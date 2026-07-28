@@ -1,9 +1,11 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 import ctypes
+import ctypes.wintypes as wintypes
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -14,7 +16,6 @@ from tkinter import ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(HERE, "settings.json")
-CREDS_PATH = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 ORANGE = "#d17552"
@@ -55,8 +56,6 @@ def load_settings():
             s.update(json.load(f))
     except (OSError, ValueError):
         pass  # ponytail: any unreadable/corrupt settings file just means defaults
-    if not s["launch_cmd"]:
-        s["launch_cmd"] = detect_launch_cmd()
     return s
 
 
@@ -69,7 +68,25 @@ def save_settings(s):
 
 
 def detect_launch_cmd():
-    """Best guess at how to start Claude. Editable in settings."""
+    """Work out how to start Claude on this machine. Cached in settings."""
+    # Start Menu entry. Covers the Store/MSIX build (whose exe lives under the
+    # ACL-locked WindowsApps and can only be started by AppUserModelID) as well
+    # as ordinary installers, without knowing any version-stamped path.
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-StartApps | Where-Object {$_.Name -match 'Claude'} |"
+             " Select-Object -ExpandProperty AppID"],
+            capture_output=True, text=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.split()
+        # Prefer the desktop app over 'Claude Code'-style entries if both exist.
+        for aumid in sorted(out, key=len):
+            if "claude" in aumid.lower():
+                return "explorer.exe shell:AppsFolder\\" + aumid
+    except (OSError, subprocess.SubprocessError):
+        pass
+
     local = os.environ.get("LOCALAPPDATA", "")
     for path in (
         os.path.join(local, "AnthropicClaude", "claude.exe"),
@@ -77,22 +94,116 @@ def detect_launch_cmd():
         os.path.join(local, "Claude", "Claude.exe"),
     ):
         if os.path.exists(path):
-            return path
-    projects = os.path.join(os.path.expanduser("~"), "Projects")
-    return 'wt.exe -d "%s" cmd /k claude' % projects
+            return '"%s"' % path
+
+    if shutil.which("claude"):
+        return "cmd /k claude"
+    return ""
+
+
+def credential_files():
+    """Every place Claude Code might keep .credentials.json, best guess first."""
+    seen, out = set(), []
+    roots = [os.environ.get("CLAUDE_CONFIG_DIR")]
+    for home in (os.path.expanduser("~"), os.environ.get("USERPROFILE")):
+        if home:
+            roots.append(os.path.join(home, ".claude"))
+    for root in roots:
+        if not root:
+            continue
+        path = os.path.join(root, ".credentials.json")
+        if path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def _token_from_blob(text):
+    """Pull an unexpired access token out of a credentials JSON document."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    oauth = data.get("claudeAiOauth") or data
+    if not isinstance(oauth, dict):
+        return None
+    token = oauth.get("accessToken")
+    expires = oauth.get("expiresAt")
+    if not token:
+        return None
+    # Expired is as good as absent: go grey so a click can relaunch Claude,
+    # rather than spending a round trip to be told 401.
+    if isinstance(expires, (int, float)) and time.time() * 1000 > expires:
+        return None
+    return token
+
+
+def _credentials_from_manager():
+    """Read the token from Windows Credential Manager, if it lives there.
+
+    Some setups store credentials there rather than on disk. Enumerate and look
+    for a Claude entry rather than guessing at the exact target name.
+    """
+    class CREDENTIAL(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD), ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR), ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_char)),
+            ("Persist", wintypes.DWORD), ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p), ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    advapi = ctypes.windll.advapi32
+    count = wintypes.DWORD()
+    creds = ctypes.POINTER(ctypes.POINTER(CREDENTIAL))()
+    if not advapi.CredEnumerateW(None, 0, ctypes.byref(count), ctypes.byref(creds)):
+        return None
+    try:
+        for i in range(count.value):
+            cred = creds[i].contents
+            if "claude" not in (cred.TargetName or "").lower():
+                continue
+            raw = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+            for encoding in ("utf-8", "utf-16-le"):
+                try:
+                    token = _token_from_blob(raw.decode(encoding))
+                except UnicodeDecodeError:
+                    continue
+                if token:
+                    return token
+    finally:
+        advapi.CredFree(creds)
+    return None
+
+
+def find_token():
+    """Locate Claude's OAuth access token, wherever this machine keeps it."""
+    for path in credential_files():
+        try:
+            with open(path, encoding="utf-8") as f:
+                token = _token_from_blob(f.read())
+        except OSError:
+            continue
+        if token:
+            return token
+    try:
+        return _credentials_from_manager()
+    except Exception:
+        return None  # ponytail: no Credential Manager access -> just go grey
 
 
 def fetch_usage():
     """Return (session_pct, weekly_pct), or None if usage can't be read.
 
-    Uses the OAuth token Claude Code already stores. Deliberately does not
-    refresh it -- racing Claude Code's own refresh can invalidate its session.
-    Launching Claude is the refresh path.
+    Uses the OAuth token Claude already stores. Deliberately does not refresh
+    it -- racing Claude's own refresh can invalidate its session. Launching
+    Claude is the refresh path.
     """
-    try:
-        with open(CREDS_PATH, encoding="utf-8") as f:
-            token = json.load(f)["claudeAiOauth"]["accessToken"]
-    except (OSError, ValueError, KeyError):
+    token = find_token()
+    if not token:
         return None
     req = urllib.request.Request(
         USAGE_URL,
@@ -315,11 +426,21 @@ class Widget:
         else:
             self.launch_claude()
 
+    def ensure_launch_cmd(self):
+        """Resolve how to start Claude on first use, then remember it."""
+        if not self.s["launch_cmd"]:
+            self.s["launch_cmd"] = detect_launch_cmd()
+            if self.s["launch_cmd"]:
+                save_settings(self.s)
+        return self.s["launch_cmd"]
+
     def launch_claude(self):
-        cmd = self.s["launch_cmd"]
+        cmd = self.ensure_launch_cmd()
         if not cmd:
             return
         try:
+            # Whatever the user has in this field, run as typed -- it is a
+            # command line they own, not untrusted input.
             subprocess.Popen(cmd, shell=True)
         except OSError as e:
             print("launch failed:", e, file=sys.stderr)
@@ -408,7 +529,7 @@ class Widget:
             row=row, column=0, columnspan=3, sticky="w", pady=(8, 2)
         )
         row += 1
-        launch = tk.StringVar(value=self.s["launch_cmd"])
+        launch = tk.StringVar(value=self.ensure_launch_cmd())
         ttk.Entry(frame, textvariable=launch, width=48).grid(
             row=row, column=0, columnspan=3, sticky="we"
         )
@@ -472,6 +593,34 @@ def selftest():
     # a taskbar-reduced work area keeps the widget inside it
     x, y = edge_position("bottom", 900, 500, w, h, (0, 0, 1920, 1040), 12)
     assert y + h <= 1040
+
+    # token parsing: both the wrapped and bare shapes, expiry respected
+    future = (time.time() + 3600) * 1000
+    past = (time.time() - 3600) * 1000
+    assert _token_from_blob(
+        json.dumps({"claudeAiOauth": {"accessToken": "t", "expiresAt": future}})
+    ) == "t"
+    assert _token_from_blob(
+        json.dumps({"accessToken": "t", "expiresAt": future})
+    ) == "t"
+    assert _token_from_blob(
+        json.dumps({"claudeAiOauth": {"accessToken": "t", "expiresAt": past}})
+    ) is None
+    assert _token_from_blob(json.dumps({"claudeAiOauth": {}})) is None
+    assert _token_from_blob("not json") is None
+    # a token with no expiry recorded is used rather than discarded
+    assert _token_from_blob(json.dumps({"accessToken": "t"})) == "t"
+
+    # credential search covers CLAUDE_CONFIG_DIR and the default location
+    os.environ["CLAUDE_CONFIG_DIR"] = os.path.join("X:", "custom")
+    try:
+        paths = credential_files()
+    finally:
+        del os.environ["CLAUDE_CONFIG_DIR"]
+    assert paths[0] == os.path.join("X:", "custom", ".credentials.json")
+    assert any(p.endswith(os.path.join(".claude", ".credentials.json")) for p in paths)
+    assert len(paths) == len(set(paths)), "duplicate paths"
+    assert all(os.path.isabs(p) or p[1:2] == ":" for p in credential_files())
 
     # easing: anchored at both ends, monotonic, and front-loaded
     assert ease_out(0) == 0 and ease_out(1) == 1

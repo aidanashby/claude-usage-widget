@@ -19,7 +19,8 @@ Grey means usage couldn't be read just now, and the bars are showing the last kn
 
 - Windows
 - Python 3.8+ (tkinter included — it ships with the standard python.org installer)
-- Claude Code installed and signed in
+- Claude installed and signed in — either the desktop app or the Claude Code CLI, since both
+  share the same stored credentials
 
 No third-party packages. Everything used is standard library.
 
@@ -62,7 +63,7 @@ window) puts everything back as it was.
 | Background opacity | 0.7 | See the caveat below |
 | Distance from screen edge | 12px | How far off the edge it parks |
 | Open on startup | off | Registry `Run` entry |
-| Launch command | auto-detected | What a grey-state click runs |
+| Launch command | auto-detected on first use | What a grey-state click runs |
 
 Everything is written to `settings.json` beside the script, along with the last known usage
 values and the widget's position. Delete that file to reset to defaults.
@@ -74,15 +75,22 @@ would mean Win32 layered windows via ctypes, which wasn't worth the complexity. 
 
 ## Where the data comes from
 
-The widget polls `GET https://api.anthropic.com/api/oauth/usage` every 60 seconds. It
-authenticates with the OAuth access token Claude Code already stores locally in
-`~/.claude/.credentials.json`, reading `five_hour.utilization` and `seven_day.utilization` from
-the response — the same numbers `/usage` shows you inside a Claude session.
+The widget polls `GET https://api.anthropic.com/api/oauth/usage` every 60 seconds, reading
+`five_hour.utilization` and `seven_day.utilization` from the response — the same numbers
+`/usage` shows you inside a Claude session.
 
 Claude does **not** need to be running for this to work.
 
-The token is read from disk, sent to Anthropic, and never logged, displayed, or stored anywhere
-by the widget.
+It authenticates with the OAuth access token Claude already stores locally, looking in each of
+these in turn:
+
+1. `%CLAUDE_CONFIG_DIR%\.credentials.json`, if you've relocated your config directory
+2. `%USERPROFILE%\.claude\.credentials.json` — the usual place
+3. Windows Credential Manager, for setups that keep credentials there instead of on disk
+
+The token is read locally, sent only to Anthropic, and never logged, displayed, or written
+anywhere by the widget. If the stored token has already expired, the widget doesn't bother
+sending it — it goes grey instead.
 
 ### Why it goes grey
 
@@ -90,14 +98,26 @@ Grey means the last poll failed. Usually one of:
 
 - the stored access token has expired
 - you're offline
-- `~/.claude/.credentials.json` is missing or unreadable
+- no credentials could be found in any of the locations above
+- you're authenticated by API key or via Bedrock/Vertex rather than a Claude subscription, in
+  which case there are no session or weekly limits to report
 
-The widget deliberately does **not** refresh the token itself — racing Claude Code's own refresh
-can invalidate its session. Instead, starting Claude refreshes the token, so a grey-state click
-runs the launch command, and the bars return to orange on the next poll.
+The widget deliberately does **not** refresh the token itself — racing Claude's own refresh can
+invalidate its session. Instead, starting Claude refreshes the token, so a grey-state click runs
+the launch command, and the bars return to orange on the next poll.
 
-The launch command defaults to opening Windows Terminal in `~/Projects` running `claude`. If
-you'd rather it opened the Claude desktop app, paste that path into the settings field.
+### The launch command
+
+Worked out automatically the first time it's needed, then remembered:
+
+1. Your Start Menu entry for Claude, launched by its AppUserModelID. This covers the Microsoft
+   Store / MSIX build — whose executable lives under the permission-locked `WindowsApps`
+   directory and can't be run directly — as well as ordinary installers.
+2. Common install locations under `%LOCALAPPDATA%`, for older desktop builds.
+3. `cmd /k claude`, if the Claude Code CLI is on your `PATH`.
+
+If none of those find it, or you'd rather it opened something else, type your own command into
+the settings field and it'll be used as-is.
 
 ## Caveats
 
@@ -116,9 +136,10 @@ python widget.pyw --selftest
 ```
 
 Covers the edge-snapping geometry (including secondary monitors and monitors at negative
-coordinates) and the animation easing curve. The GUI itself is checked by running it.
+coordinates), credential discovery and token parsing, and the animation easing curve. The GUI
+itself is checked by running it.
 
-The whole thing is one file, `widget.pyw`, at around 350 lines.
+The whole thing is one file, `widget.pyw`.
 
 ## Licence
 
