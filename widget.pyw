@@ -565,6 +565,7 @@ class Widget:
         self.live = False
         self.anim = None
         self.dragging = False
+        self.stopping = threading.Event()
         self.edge = self.s["edge"]
 
         self.root = tk.Tk()
@@ -672,6 +673,7 @@ class Widget:
         save_settings(self.s)
 
     def quit(self):
+        self.stopping.set()  # let the poll thread finish before the interpreter does
         if self.tray:
             self.tray.remove()
         self.root.destroy()
@@ -691,10 +693,18 @@ class Widget:
     # --- polling ---
 
     def poll_loop(self):
-        while True:
+        # Waits on an Event rather than sleeping: a daemon thread parked in
+        # time.sleep wakes up during interpreter shutdown to find the GIL gone,
+        # which ends the process with a fatal error instead of a clean exit.
+        while not self.stopping.is_set():
             result = fetch_usage()
-            self.root.after(0, self.apply_usage, result)
-            time.sleep(POLL_SECONDS)
+            if self.stopping.is_set():
+                return
+            try:
+                self.root.after(0, self.apply_usage, result)
+            except tk.TclError:
+                return  # window went away mid-poll
+            self.stopping.wait(POLL_SECONDS)
 
     def apply_usage(self, result):
         self.live = result is not None
