@@ -45,10 +45,43 @@ That writes a `ClaudeUsageWidget` value to
 - **Left-click** opens settings — or, if the bars are grey, runs the launch command instead
   (see below).
 - **Right-click** always opens settings, grey or not.
-- **Quit** from the settings window. There's no tray icon and no title bar, so that's the way out.
+- **Quit** from the tray icon, or from the settings window.
 
-Only one instance can run at a time. Launching a second one exits silently rather than stacking
-a duplicate on top of the first.
+Only one instance runs at a time. Launching a second copy doesn't start one — it recalls the
+existing widget to the top-right of your primary monitor, which is useful if you've lost track
+of it.
+
+## Tray icon
+
+The widget has no title bar and can end up somewhere awkward, so it also sits in the system
+tray. That's always the way back to it.
+
+- **Hover** — shows the actual percentages, which the bars deliberately don't display
+- **Right-click** — Settings · Reset position · Quit
+- **Double-click** — opens settings
+
+**Reset position** returns it to the top-right of your primary monitor.
+
+## If it goes missing
+
+It shouldn't any more. The widget checks its saved position against the monitors that actually
+exist, both at startup and every two seconds while running, and recalls itself to the primary
+monitor's top-right whenever it would otherwise be stranded off-screen. That covers unplugging
+an external monitor, changing display settings, and starting up with a different monitor
+arrangement than last time.
+
+If you ever need to reach it from a script or a terminal:
+
+```bash
+pythonw widget.pyw --reset
+pythonw widget.pyw --quit
+```
+
+Both act on the running widget and report `not running` if there isn't one.
+
+In Task Manager the process appears as `pythonw.exe`. To tell it apart from other Python
+programs, switch to the **Details** tab, right-click the column headers, choose **Select
+columns**, and enable **Command line** — the widget's row shows `widget.pyw`.
 
 ## Settings
 
@@ -128,6 +161,9 @@ the settings field and it'll be used as-is.
 - It won't draw over full-screen exclusive applications (games, mostly). That's a Windows
   always-on-top limitation.
 - Snapping uses the monitor's *work area*, so it respects the taskbar.
+- Tk runs DPI-virtualised, so on setups that mix monitors at different scaling factors the
+  widget may sit a few pixels off where you'd expect. It stays on screen and reachable; it's
+  just not pixel-exact.
 
 ## Development
 
@@ -136,8 +172,9 @@ python widget.pyw --selftest
 ```
 
 Covers the edge-snapping geometry (including secondary monitors and monitors at negative
-coordinates), credential discovery and token parsing, and the animation easing curve. The GUI
-itself is checked by running it.
+coordinates), the off-screen fallback position, credential discovery and token parsing, the
+tray icon's pixel buffer, and the animation easing curve. The GUI and tray are checked by
+running it.
 
 The whole thing is one file, `widget.pyw`.
 
