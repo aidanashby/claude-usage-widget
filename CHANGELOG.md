@@ -3,6 +3,34 @@
 All notable changes to this project are documented here. Versions follow
 [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [0.8.0] — 2026-07-30
+
+Shows how far through each limit window you are, not just how much you've spent.
+
+### Added
+
+- **Window progress marker.** A 1px vertical line in each bar showing elapsed time through that
+  window — white on the empty track, black where it crosses the used portion. Positions come
+  from the `resets_at` the API reports for your account, so they reflect your real windows
+  rather than an assumed schedule. Redrawn every 30 seconds from cached times, no network
+  needed.
+- **Hover tooltip** over the whole widget, giving both reset times: the session as a countdown
+  (`resets in 31 min`), the week as a wall-clock time (`resets Sun 8:45am`). Works while the
+  bars are grey, since a reset time stays true without the API.
+
+### Changed
+
+- **Polling moved from every 60 seconds to every 5 minutes.** The endpoint rate-limits, and at
+  one-minute intervals roughly one request in three came back `429` — which is what made usage
+  appear to stop updating. The markers don't need frequent polling, as they run off cached
+  reset times.
+
+### Fixed
+
+- Being rate limited no longer reports itself as "click the widget to start Claude". The tray
+  tooltip now distinguishes rate limiting, rejected credentials, missing credentials and
+  network failures. Bars still go grey in every case.
+
 ## [0.7.0] — 2026-07-30
 
 Adds a system tray icon, makes the widget recover from monitor layout changes, and fixes three
@@ -76,6 +104,7 @@ First release. Two thin bars showing Claude session (rolling 5-hour) and weekly 
   Claude to refresh the token
 - Single instance only
 
+[0.8.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.8.0
 [0.7.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.7.0
 [0.6.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.6.0
 [0.5.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.5.0

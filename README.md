@@ -15,6 +15,30 @@ No labels, no numbers, no window chrome. It sits in a corner of your screen and 
 Bar length is percentage of that limit consumed. Orange (`#d17552`) means the reading is live.
 Grey means usage couldn't be read just now, and the bars are showing the last known values.
 
+### The vertical marker
+
+Each bar carries a thin vertical line showing how far through *that window* you are — a fifth
+of the way along the top bar means an hour into your five-hour session. Comparing the two tells
+you whether you're on pace: bar well ahead of the marker means you're burning the limit faster
+than the clock.
+
+The marker is white on the empty track and turns black where it crosses the used portion, so it
+stays visible either way. Window positions come from the reset times the API reports for your
+account, not from an assumed schedule.
+
+### Hover for reset times
+
+Hovering anywhere on the widget shows both, in words:
+
+```
+Current session: resets in 31 min
+Weekly limit: resets Sun 8:45am
+```
+
+The session is a countdown because it's usually close; the weekly is a wall-clock time because
+a countdown in days isn't much use. Both keep working while the bars are grey — a reset time
+stays true whether or not the API is reachable.
+
 ## Requirements
 
 - Windows
@@ -119,9 +143,13 @@ would mean Win32 layered windows via ctypes, which wasn't worth the complexity. 
 
 ## Where the data comes from
 
-The widget polls `GET https://api.anthropic.com/api/oauth/usage` every 60 seconds, reading
-`five_hour.utilization` and `seven_day.utilization` from the response — the same numbers
-`/usage` shows you inside a Claude session.
+The widget polls `GET https://api.anthropic.com/api/oauth/usage` every five minutes, reading
+`five_hour` and `seven_day` from the response — the same numbers `/usage` shows you inside a
+Claude session, plus each window's `resets_at`.
+
+Five minutes rather than one: the endpoint rate-limits, and polling every minute got roughly
+one request in three rejected. The markers don't need it either, since they're redrawn from
+the cached reset times every 30 seconds without touching the network.
 
 Claude does **not** need to be running for this to work.
 
@@ -183,9 +211,9 @@ python widget.pyw --selftest
 ```
 
 Covers the edge-snapping geometry (including secondary monitors and monitors at negative
-coordinates), the off-screen fallback position, credential discovery and token parsing, the
-tray icon's pixel buffer, and the animation easing curve. The GUI and tray are checked by
-running it.
+coordinates), the off-screen fallback position, credential discovery and token parsing, window
+progress and the marker's contrast rule, the countdown and clock formatting, the tray icon's
+pixel buffer, and the animation easing curve. The GUI and tray are checked by running it.
 
 **Test with `pythonw`, not `python`.** Under `pythonw` with no console, `sys.stdout` and
 `sys.stderr` are `None`, so anything that writes to them raises — including from inside an

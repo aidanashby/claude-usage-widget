@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -12,6 +12,8 @@ import threading
 import time
 import traceback
 import tkinter as tk
+from collections import namedtuple
+from datetime import datetime
 import urllib.request
 from tkinter import ttk
 
@@ -24,7 +26,13 @@ ORANGE = "#d17552"
 GREY = "#7a7a7a"
 TRACK = "#3a3a3a"
 BAR_LENGTH = 120
-POLL_SECONDS = 60
+POLL_SECONDS = 300
+MARKER_REFRESH_MS = 30000
+TOOLTIP_DELAY_MS = 450
+SESSION_WINDOW_SECONDS = 5 * 3600
+WEEKLY_WINDOW_SECONDS = 7 * 24 * 3600
+MARKER_ON_TRACK = "#ffffff"
+MARKER_ON_FILL = "#000000"
 STARTUP_DELAY_SECONDS = 8
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "ClaudeUsageWidget"
@@ -50,6 +58,8 @@ DEFAULTS = {
     "last_weekly": 0.0,
     "pos": None,
     "edge": "right",
+    "last_session_reset": None,
+    "last_weekly_reset": None,
 }
 
 
@@ -86,6 +96,62 @@ def log_exception(kind, exc):
         log(traceback.format_exc().rstrip())
     except Exception:
         pass
+
+
+def parse_reset(value):
+    """ISO-8601 reset timestamp from the API to epoch seconds, or None."""
+    if not value:
+        return None
+    try:
+        text = value.strip()
+        if text.endswith("Z"):  # fromisoformat only learned 'Z' in 3.11
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text).timestamp()
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def window_progress(reset_epoch, window_seconds, now=None):
+    """How far through a fixed-length window we are, 0.0-1.0, or None.
+
+    Both limits run for a fixed span ending at resets_at, so the elapsed
+    fraction follows from the reset time alone -- and because resets_at comes
+    from the API it reflects this user's actual window, not an assumed one.
+    """
+    if not reset_epoch or window_seconds <= 0:
+        return None
+    now = time.time() if now is None else now
+    remaining = reset_epoch - now
+    # Clamped so a stale cached reset can never push the marker off the bar.
+    return max(0.0, min(1.0, 1.0 - remaining / float(window_seconds)))
+
+
+def format_countdown(seconds):
+    """The tail of 'resets ...': 'in 31 min', 'in 2h 5min', 'any moment now'."""
+    if seconds is None:
+        return "at an unknown time"
+    seconds = int(seconds)
+    if seconds <= 0:
+        return "any moment now"
+    if seconds < 60:
+        return "in less than a minute"
+    minutes = seconds // 60
+    if minutes < 60:
+        return "in %d min" % minutes
+    hours, mins = divmod(minutes, 60)
+    return "in %dh" % hours if mins == 0 else "in %dh %dmin" % (hours, mins)
+
+
+def format_reset_time(epoch):
+    """Local wall-clock reset, e.g. 'Sun 8:45am'."""
+    if not epoch:
+        return "at an unknown time"
+    lt = time.localtime(epoch)
+    hour = lt.tm_hour % 12 or 12  # 0 -> 12am, 12 -> 12pm
+    return "%s %d:%02d%s" % (
+        time.strftime("%a", lt), hour, lt.tm_min,
+        "am" if lt.tm_hour < 12 else "pm",
+    )
 
 
 def load_settings():
@@ -234,8 +300,15 @@ def find_token():
         return None  # ponytail: no Credential Manager access -> just go grey
 
 
+Usage = namedtuple("Usage", "session weekly session_reset weekly_reset")
+
+
 def fetch_usage():
-    """Return (session_pct, weekly_pct), or None if usage can't be read.
+    """Return a Usage, or a short string saying why it couldn't be read.
+
+    The string is what the tray tooltip shows: being rate limited is a very
+    different situation from having no credentials, and telling the user to
+    start Claude in the first case is just wrong.
 
     Uses the OAuth token Claude already stores. Deliberately does not refresh
     it -- racing Claude's own refresh can invalidate its session. Launching
@@ -243,7 +316,7 @@ def fetch_usage():
     """
     token = find_token()
     if not token:
-        return None
+        return "no Claude credentials found"
     req = urllib.request.Request(
         USAGE_URL,
         headers={
@@ -255,12 +328,21 @@ def fetch_usage():
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.load(r)
-        return (
+        return Usage(
             float(data["five_hour"]["utilization"]),
             float(data["seven_day"]["utilization"]),
+            parse_reset(data["five_hour"].get("resets_at")),
+            parse_reset(data["seven_day"].get("resets_at")),
         )
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return "rate limited by the API — will retry"
+        if e.code in (401, 403):
+            return "Claude credentials rejected — sign in again"
+        return "usage request failed (HTTP %s)" % e.code
     except Exception:
-        return None  # ponytail: offline, 401, schema drift -- all mean "go grey"
+        # ponytail: offline, DNS, schema drift -- all just mean "go grey"
+        return "usage unavailable"
 
 
 class _Rect(ctypes.Structure):
@@ -708,6 +790,81 @@ def signal_running_widget(message):
     return True
 
 
+class Tooltip:
+    """One hover tooltip for the whole widget, carrying both reset times."""
+
+    def __init__(self, widget):
+        self.widget = widget
+        self.win = None
+        self.timer = None
+        canvas = widget.canvas
+        canvas.bind("<Enter>", self.schedule, add="+")
+        canvas.bind("<Leave>", lambda e: self.hide(), add="+")
+        canvas.bind("<Button-1>", lambda e: self.hide(), add="+")
+
+    def schedule(self, _=None):
+        self.cancel()
+        self.timer = self.widget.root.after(TOOLTIP_DELAY_MS, self.show)
+
+    def cancel(self):
+        if self.timer:
+            try:
+                self.widget.root.after_cancel(self.timer)
+            except Exception:
+                pass
+            self.timer = None
+
+    def show(self):
+        self.timer = None
+        if self.widget.dragging:
+            return
+        self.hide()
+        try:
+            win = tk.Toplevel(self.widget.root)
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            try:
+                # Non-interactive, so it can never swallow a click meant for
+                # the widget underneath or take focus from the active window.
+                win.attributes("-disabled", True)
+            except tk.TclError:
+                pass
+            frame = tk.Frame(win, bg="#141414", highlightthickness=1,
+                             highlightbackground="#4a4a4a")
+            frame.pack()
+            for line in self.widget.tooltip_lines():
+                tk.Label(
+                    frame, text=line, bg="#141414", fg="#e8e8e8",
+                    font=("Segoe UI", 8), anchor="w", justify="left",
+                    padx=8, pady=1,
+                ).pack(fill="x")
+            win.update_idletasks()
+            win.geometry("+%d+%d" % self._place(win))
+            self.win = win
+        except Exception as e:
+            log_exception("tooltip", e)
+
+    def _place(self, win):
+        """Below the widget, flipped above if there's no room, always on screen."""
+        tw, th = win.winfo_reqwidth(), win.winfo_reqheight()
+        wx, wy = self.widget.root.winfo_x(), self.widget.root.winfo_y()
+        left, top, right, bottom = self.widget.current_rect(wx, wy)
+        y = wy + self.widget.h + 6
+        if y + th > bottom:
+            y = wy - th - 6
+        x = max(left, min(wx, right - tw))
+        return (x, max(top, min(y, bottom - th)))
+
+    def hide(self):
+        self.cancel()
+        if self.win:
+            try:
+                self.win.destroy()
+            except Exception:
+                pass
+            self.win = None
+
+
 class Widget:
     def __init__(self):
         self.s = load_settings()
@@ -751,7 +908,9 @@ class Widget:
         self.layout()
         self.place_initial()
         self.tray = TrayIcon(self)
+        self.tooltip = Tooltip(self)
         self.root.after(2000, self.watch_layout)
+        self.root.after(MARKER_REFRESH_MS, self.tick_marker)
         threading.Thread(target=self.poll_loop, daemon=True).start()
 
     # --- geometry / drawing ---
@@ -768,7 +927,11 @@ class Widget:
         self.canvas.delete("all")
         p, t, sp = self.s["padding"], self.s["thickness"], self.s["spacing"]
         colour = ORANGE if self.live else GREY
-        for i, pct in enumerate((self.session, self.weekly)):
+        bars = (
+            (self.session, self.s["last_session_reset"], SESSION_WINDOW_SECONDS),
+            (self.weekly, self.s["last_weekly_reset"], WEEKLY_WINDOW_SECONDS),
+        )
+        for i, (pct, reset, window) in enumerate(bars):
             top = p + i * (t + sp)
             self.canvas.create_rectangle(
                 p, top, p + BAR_LENGTH, top + t, fill=TRACK, width=0
@@ -777,6 +940,15 @@ class Widget:
             if fill > 0:
                 self.canvas.create_rectangle(
                     p, top, p + fill, top + t, fill=colour, width=0
+                )
+            # How far through the window we are: black over the spent portion,
+            # white over the empty track, so it reads against either.
+            progress = window_progress(reset, window)
+            if progress is not None:
+                x = p + min(BAR_LENGTH - 1, BAR_LENGTH * progress)
+                self.canvas.create_rectangle(
+                    x, top, x + 1, top + t, width=0,
+                    fill=MARKER_ON_FILL if x < p + fill else MARKER_ON_TRACK,
                 )
 
     def current_rect(self, x=None, y=None):
@@ -822,9 +994,26 @@ class Widget:
         self.s["pos"] = list(target)
         save_settings(self.s)
 
+    def tick_marker(self):
+        """Advance the window markers between polls -- cached times, no network."""
+        self.draw()
+        self.root.after(MARKER_REFRESH_MS, self.tick_marker)
+
     def watch_layout(self):
         self.ensure_visible()
         self.root.after(2000, self.watch_layout)
+
+    def tooltip_lines(self):
+        """Two lines: the session as a countdown, the week as a wall-clock time."""
+        session = self.s["last_session_reset"]
+        weekly = self.s["last_weekly_reset"]
+        return [
+            "Current session: resets %s" % (
+                format_countdown(session - time.time()) if session
+                else "at an unknown time"
+            ),
+            "Weekly limit: resets %s" % format_reset_time(weekly),
+        ]
 
     def reset_position(self):
         """Put the widget back top-right of the primary monitor."""
@@ -868,17 +1057,24 @@ class Widget:
             self.stopping.wait(POLL_SECONDS)
 
     def apply_usage(self, result):
-        self.live = result is not None
-        if result:
-            self.session, self.weekly = result
-            self.s["last_session"], self.s["last_weekly"] = result
+        self.live = isinstance(result, Usage)
+        if self.live:
+            self.session, self.weekly = result.session, result.weekly
+            self.s["last_session"] = result.session
+            self.s["last_weekly"] = result.weekly
+            # Cached because a reset time stays true without the API: the
+            # marker and tooltip keep working while the bars are grey.
+            if result.session_reset:
+                self.s["last_session_reset"] = result.session_reset
+            if result.weekly_reset:
+                self.s["last_weekly_reset"] = result.weekly_reset
             save_settings(self.s)
         self.draw()
         # The bars are deliberately unlabelled, so the tooltip carries the numbers.
-        if result:
+        if self.live:
             tip = "Session %d%%  ·  Weekly %d%%" % (self.session, self.weekly)
         else:
-            tip = "Usage unavailable — click the widget to start Claude"
+            tip = str(result)
         self.tray.set_tooltip("%s\n%s" % (WINDOW_TITLE, tip))
 
     # --- drag / snap ---
@@ -887,6 +1083,7 @@ class Widget:
         self.press = (e.x_root, e.y_root)
         self.origin = (self.root.winfo_x(), self.root.winfo_y())
         self.dragging = True
+        self.tooltip.hide()
 
     def on_drag(self, e):
         dx = e.x_root - self.press[0]
@@ -1108,6 +1305,54 @@ def selftest():
     assert top_right_of(right_mon, w, h, 0) == (3840 - w, 0)
     # a stranded position is off every monitor, so it must not survive as-is
     assert not (primary[0] <= -30000 <= primary[2])
+
+    # window progress: derived from the reset time and a fixed window length
+    now = 1_000_000.0
+    hour = 3600.0
+    assert window_progress(now + 2.5 * hour, SESSION_WINDOW_SECONDS, now) == 0.5
+    assert window_progress(now + 5 * hour, SESSION_WINDOW_SECONDS, now) == 0.0
+    assert window_progress(now, SESSION_WINDOW_SECONDS, now) == 1.0
+    # a reset already past, or further out than the window, must stay on the bar
+    assert window_progress(now - 9999, SESSION_WINDOW_SECONDS, now) == 1.0
+    assert window_progress(now + 99 * hour, SESSION_WINDOW_SECONDS, now) == 0.0
+    assert window_progress(None, SESSION_WINDOW_SECONDS, now) is None
+    assert 0.5 == window_progress(now + 3.5 * 24 * hour, WEEKLY_WINDOW_SECONDS, now)
+
+    # countdown wording
+    assert format_countdown(31 * 60) == "in 31 min"
+    assert format_countdown(59) == "in less than a minute"
+    assert format_countdown(60) == "in 1 min"
+    assert format_countdown(90 * 60) == "in 1h 30min"
+    assert format_countdown(2 * 3600) == "in 2h"
+    assert format_countdown(0) == "any moment now"
+    assert format_countdown(-500) == "any moment now"
+    assert format_countdown(None) == "at an unknown time"
+
+    # 12-hour clock: midnight and noon are the classic off-by-twelve
+    midnight = time.mktime((2026, 8, 2, 0, 5, 0, 0, 0, -1))
+    noon = time.mktime((2026, 8, 2, 12, 5, 0, 0, 0, -1))
+    morning = time.mktime((2026, 8, 2, 8, 45, 0, 0, 0, -1))
+    assert format_reset_time(midnight).endswith("12:05am"), format_reset_time(midnight)
+    assert format_reset_time(noon).endswith("12:05pm"), format_reset_time(noon)
+    assert format_reset_time(morning).endswith("8:45am"), format_reset_time(morning)
+    assert format_reset_time(morning).startswith("Sun "), format_reset_time(morning)
+    assert format_reset_time(None) == "at an unknown time"
+
+    # ISO parsing, including the 'Z' form fromisoformat only took in 3.11
+    assert parse_reset("2026-08-02T03:00:00.543041+00:00") == parse_reset(
+        "2026-08-02T03:00:00.543041Z"
+    )
+    assert parse_reset(None) is None and parse_reset("nonsense") is None
+
+    # marker colour: black over the spent portion, white over the empty track
+    def marker_colour(pct, progress):
+        fill = BAR_LENGTH * pct / 100.0
+        x = min(BAR_LENGTH - 1, BAR_LENGTH * progress)
+        return MARKER_ON_FILL if x < fill else MARKER_ON_TRACK
+    assert marker_colour(80, 0.25) == MARKER_ON_FILL   # well inside the fill
+    assert marker_colour(20, 0.75) == MARKER_ON_TRACK  # out on the bare track
+    assert marker_colour(0, 0.5) == MARKER_ON_TRACK    # nothing used yet
+    assert marker_colour(100, 0.5) == MARKER_ON_FILL   # bar completely full
 
     # tray icon buffer: square, 4 bytes a pixel, at whatever size is asked for
     for size in (16, 20, 32):
