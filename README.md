@@ -46,7 +46,7 @@ before it appears — tray icons registered too early are silently dropped by th
   with an ease-out animation. Its position is remembered between runs.
 - **Left-click** opens settings — or, if the bars are grey, runs the launch command instead
   (see below).
-- **Right-click** always opens settings, grey or not.
+- **Right-click the widget** always opens settings, grey or not.
 - **Quit** from the tray icon, or from the settings window.
 
 Only one instance runs at a time. Launching a second copy doesn't start one — it recalls the
@@ -187,7 +187,25 @@ coordinates), the off-screen fallback position, credential discovery and token p
 tray icon's pixel buffer, and the animation easing curve. The GUI and tray are checked by
 running it.
 
-The whole thing is one file, `widget.pyw`.
+**Test with `pythonw`, not `python`.** Under `pythonw` with no console, `sys.stdout` and
+`sys.stderr` are `None`, so anything that writes to them raises — including from inside an
+exception handler, which turns a handled error into a fatal one. Bugs that only appear this way
+cost a release to find. Launch it the way Windows does:
+
+```bash
+powershell -Command "Start-Process pythonw.exe -ArgumentList (Resolve-Path widget.pyw) -WindowStyle Hidden"
+```
+
+Use `log()` rather than `print()` for anything that needs to be seen.
+
+Two more things worth knowing before touching the tray code. Every Win32 call needs its
+`argtypes`/`restype` declared in `_declare_win32()` — handles routinely exceed 32 bits and an
+undeclared call raises `OverflowError` on 64-bit Python. And the window procedure must never
+call into Tk: it runs inside a ctypes callback nested in Tk's own event loop, and Tk isn't
+re-entrant, so doing so aborts the process with no Python traceback. Queue the action and let
+`_pump` run it.
+
+The whole thing is one file, `widget.pyw`. Release history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 
