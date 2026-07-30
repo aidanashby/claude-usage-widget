@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -1165,6 +1165,8 @@ class Widget:
         self.live = False
         self.anim = None
         self.dragging = False
+        self.press = None
+        self.origin = None
         self.stopping = threading.Event()
         self.edge = self.s["edge"]
 
@@ -1595,13 +1597,21 @@ class Widget:
         self.tooltip.hide()
 
     def on_drag(self, e):
+        # A drag or release can arrive with no press behind it -- press
+        # elsewhere and let go over the widget, or have the window appear
+        # under the cursor mid-click -- so there may be no anchor to move from.
+        if self.press is None:
+            return
         dx = e.x_root - self.press[0]
         dy = e.y_root - self.press[1]
         self.root.geometry("+%d+%d" % (self.origin[0] + dx, self.origin[1] + dy))
 
     def on_release(self, e):
         self.dragging = False
+        if self.press is None:
+            return
         moved = abs(e.x_root - self.press[0]) + abs(e.y_root - self.press[1])
+        self.press = None
         if moved < 5:
             self.on_click()
         else:

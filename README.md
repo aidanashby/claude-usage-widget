@@ -83,7 +83,7 @@ tagged commit, with a provenance attestation, so you can confirm the zip really 
 source:
 
 ```bash
-gh attestation verify ClaudeUsageWidget-v1.0.0-win64.zip --repo aidanashby/claude-usage-widget
+gh attestation verify ClaudeUsageWidget-v1.0.1-win64.zip --repo aidanashby/claude-usage-widget
 ```
 
 A `.sha256` is published alongside each zip too.

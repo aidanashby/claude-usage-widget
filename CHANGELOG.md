@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Versions follow
 [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [1.0.1] — 2026-07-30
+
+### Fixed
+
+- A mouse release with no press behind it — press elsewhere and let go over the widget, or have
+  the window appear under the cursor mid-click — raised `AttributeError` on a missing drag
+  anchor. Latent since the first release; found by running the actual published zip rather than
+  a local build, and caught by the error log rather than by crashing.
+
 ## [1.0.0] — 2026-07-30
 
 Makes the widget installable by people who don't have Python.
@@ -177,6 +186,7 @@ First release. Two thin bars showing Claude session (rolling 5-hour) and weekly 
   Claude to refresh the token
 - Single instance only
 
+[1.0.1]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v1.0.1
 [1.0.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v1.0.0
 [0.10.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.10.0
 [0.9.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.9.0
