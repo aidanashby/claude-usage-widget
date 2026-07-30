@@ -107,10 +107,11 @@ The widget has no title bar and can end up somewhere awkward, so it also sits in
 tray. That's always the way back to it.
 
 - **Hover** — shows the actual percentages, which the bars deliberately don't display
-- **Right-click** — Settings · Reset position · Quit
+- **Right-click** — Settings · Reset position · What is this? · Quit
 - **Double-click** — opens settings
 
-**Reset position** returns it to the top-right of your primary monitor.
+**Reset position** returns it to the top-right of your primary monitor. **What is this?**
+reopens the welcome screen you saw on first run.
 
 ## If it goes missing
 
@@ -149,6 +150,7 @@ window) puts everything back as it was.
 
 | Setting | Default | Notes |
 |---------|---------|-------|
+| Line length | 120px | Up to your screen's width, or its height when vertical |
 | Line thickness | 3px | Height of each bar |
 | Spacing between lines | 5px | Gap between the two bars |
 | Padding from edge | 6px | Panel padding around the bars |

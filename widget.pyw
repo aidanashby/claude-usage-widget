@@ -27,6 +27,7 @@ ORANGE = "#d17552"
 GREY = "#7a7a7a"
 TRACK = "#3a3a3a"
 BAR_LENGTH = 120
+MIN_BAR_LENGTH = 20
 POLL_SECONDS = 300
 MARKER_REFRESH_MS = 30000
 TOOLTIP_DELAY_MS = 450
@@ -56,7 +57,7 @@ WM_CLOSE = 0x0010
 WM_COMMAND = 0x0111
 WM_TRAY = 0x8000  # WM_APP, our tray callback
 WM_RESET_POSITION = 0x8001  # WM_APP+1, sent by --reset
-MENU_SETTINGS, MENU_RESET, MENU_QUIT = 1, 2, 3
+MENU_SETTINGS, MENU_RESET, MENU_QUIT, MENU_WELCOME = 1, 2, 3, 4
 
 DEFAULTS = {
     "thickness": 3,
@@ -73,6 +74,7 @@ DEFAULTS = {
     "edge": "right",
     "last_session_reset": None,
     "last_weekly_reset": None,
+    "bar_length": BAR_LENGTH,
     "theme": "claude",
     "click_through": False,
     "alerts": True,
@@ -162,10 +164,13 @@ def format_countdown(seconds):
 
 
 def format_clock(epoch):
-    """Just the time, e.g. '8:45am'."""
+    """Just the time: '8:45am', or '4am' when it lands exactly on the hour."""
     lt = time.localtime(epoch)
     hour = lt.tm_hour % 12 or 12  # 0 -> 12am, 12 -> 12pm
-    return "%d:%02d%s" % (hour, lt.tm_min, "am" if lt.tm_hour < 12 else "pm")
+    meridiem = "am" if lt.tm_hour < 12 else "pm"
+    if lt.tm_min == 0:
+        return "%d%s" % (hour, meridiem)
+    return "%d:%02d%s" % (hour, lt.tm_min, meridiem)
 
 
 def format_reset_time(epoch, now=None):
@@ -241,14 +246,15 @@ def project_exhaustion(pct, progress, window_seconds, now=None):
     return now + seconds_to_full
 
 
-def widget_size(padding, thickness, spacing, vertical):
+def widget_size(padding, thickness, spacing, vertical, length=BAR_LENGTH):
     """Outer size of the widget. Vertical is the horizontal case transposed."""
-    long_side = BAR_LENGTH + padding * 2
+    long_side = length + padding * 2
     short_side = thickness * 2 + spacing + padding * 2
     return (short_side, long_side) if vertical else (long_side, short_side)
 
 
-def bar_rect(along0, along1, index, padding, thickness, spacing, vertical):
+def bar_rect(along0, along1, index, padding, thickness, spacing, vertical,
+             length=BAR_LENGTH):
     """Canvas rectangle for part of a bar, in along/across terms.
 
     'along' is distance from the bar's start on its long axis, 'across' is its
@@ -259,9 +265,16 @@ def bar_rect(along0, along1, index, padding, thickness, spacing, vertical):
     across1 = across0 + thickness
     if vertical:
         # Bottom-up, so along counts from the foot of the bar.
-        foot = padding + BAR_LENGTH
+        foot = padding + length
         return (across0, foot - along1, across1, foot - along0)
     return (padding + along0, across0, padding + along1, across1)
+
+
+def max_bar_length(rect, padding, vertical):
+    """Longest bar that fits the monitor's work area on the relevant axis."""
+    left, top, right, bottom = rect
+    span = (bottom - top) if vertical else (right - left)
+    return max(MIN_BAR_LENGTH, span - padding * 2)
 
 
 def load_settings():
@@ -868,6 +881,7 @@ class TrayIcon:
         for ident, label in (
             (MENU_SETTINGS, "Settings"),
             (MENU_RESET, "Reset position"),
+            (MENU_WELCOME, "What is this?"),
             (MENU_QUIT, "Quit"),
         ):
             u.AppendMenuW(menu, 0x0, ident, label)  # MF_STRING
@@ -885,6 +899,8 @@ class TrayIcon:
             self.widget.open_settings()
         elif choice == MENU_RESET:
             self.widget.reset_position()
+        elif choice == MENU_WELCOME:
+            self.widget.show_welcome()
         elif choice == MENU_QUIT:
             self.widget.quit()
 
@@ -1060,7 +1076,9 @@ class Widget:
 
     def layout(self):
         p, t, sp = self.s["padding"], self.s["thickness"], self.s["spacing"]
-        self.w, self.h = widget_size(p, t, sp, self.s["vertical"])
+        self.w, self.h = widget_size(
+            p, t, sp, self.s["vertical"], self.bar_length()
+        )
         self.canvas.configure(width=self.w, height=self.h)
         self.root.geometry("%dx%d" % (self.w, self.h))
         self.draw()
@@ -1070,6 +1088,7 @@ class Widget:
         p, t, sp = self.s["padding"], self.s["thickness"], self.s["spacing"]
         vertical = self.s["vertical"]
         theme = THEMES.get(self.s["theme"], THEMES["claude"])
+        length = self.bar_length()
         self.canvas.configure(bg=theme["panel"])
         self.root.configure(bg=theme["panel"])
         colour = theme["bar"] if self.live else GREY
@@ -1081,21 +1100,39 @@ class Widget:
         )
         for i, (pct, reset, window) in enumerate(bars):
             def rect(a0, a1, index=i):
-                return bar_rect(a0, a1, index, p, t, sp, vertical)
+                return bar_rect(a0, a1, index, p, t, sp, vertical, length)
 
-            self.canvas.create_rectangle(*rect(0, BAR_LENGTH), fill=track, width=0)
-            fill = BAR_LENGTH * max(0.0, min(100.0, pct)) / 100.0
+            self.canvas.create_rectangle(*rect(0, length), fill=track, width=0)
+            fill = length * max(0.0, min(100.0, pct)) / 100.0
             if fill > 0:
                 self.canvas.create_rectangle(*rect(0, fill), fill=colour, width=0)
             # How far through the window we are: black over the spent portion,
             # white over the empty track, so it reads against either.
             progress = window_progress(reset, window)
             if progress is not None:
-                at = min(BAR_LENGTH - 1, BAR_LENGTH * progress)
+                at = min(length - 1, length * progress)
                 self.canvas.create_rectangle(
                     *rect(at, at + 1), width=0,
                     fill=MARKER_ON_FILL if at < fill else MARKER_ON_TRACK,
                 )
+
+    def bar_length(self):
+        """Configured length, clamped to what the current monitor can show.
+
+        Deliberately avoids self.w/self.h: layout() calls this to work them
+        out, so relying on them here would be circular.
+        """
+        try:
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+        except Exception:
+            x = y = 0
+        fallback = (0, 0, self.root.winfo_screenwidth(),
+                    self.root.winfo_screenheight())
+        longest = max_bar_length(
+            monitor_work_area(x, y, fallback), self.s["padding"],
+            self.s["vertical"],
+        )
+        return max(MIN_BAR_LENGTH, min(int(self.s["bar_length"]), longest))
 
     def current_rect(self, x=None, y=None):
         """Work area of the monitor the widget is currently on."""
@@ -1148,6 +1185,18 @@ class Widget:
     def watch_layout(self):
         self.ensure_visible()
         self.root.after(2000, self.watch_layout)
+
+    def toggle_vertical(self, value, scales):
+        """Standing the widget on end changes which screen dimension bounds it."""
+        self.apply_live("vertical", value)
+        scale = scales.get("bar_length")
+        if scale is not None:
+            longest = max_bar_length(
+                self.current_rect(), self.s["padding"], value
+            )
+            scale.configure(to=longest)
+            if self.s["bar_length"] > longest:
+                self.apply_live("bar_length", longest)
 
     def apply_click_through(self):
         """Let the mouse pass through to whatever is underneath.
@@ -1462,7 +1511,12 @@ class Widget:
 
         before = dict(self.s)  # for Cancel
 
+        longest = max_bar_length(
+            self.current_rect(), self.s["padding"], self.s["vertical"]
+        )
+        scales = {}
         sliders = [
+            ("Line length", "bar_length", MIN_BAR_LENGTH, longest, 0),
             ("Line thickness", "thickness", 1, 12, 0),
             ("Spacing between lines", "spacing", 0, 30, 0),
             ("Padding from edge", "padding", 0, 30, 0),
@@ -1472,10 +1526,10 @@ class Widget:
         for row, (label, key, lo, hi, places) in enumerate(sliders):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=3)
             var = tk.DoubleVar(value=float(self.s[key]))
-            ttk.Scale(frame, from_=lo, to=hi, variable=var, length=170).grid(
-                row=row, column=1, padx=8
-            )
-            readout = ttk.Label(frame, width=5)
+            scale = ttk.Scale(frame, from_=lo, to=hi, variable=var, length=170)
+            scale.grid(row=row, column=1, padx=8)
+            scales[key] = scale
+            readout = ttk.Label(frame, width=6)
             readout.grid(row=row, column=2, sticky="e")
 
             def update(*_, v=var, lbl=readout, pl=places, k=key):
@@ -1499,13 +1553,13 @@ class Widget:
         vertical = tk.BooleanVar(value=self.s["vertical"])
         ttk.Checkbutton(
             frame, text="Vertical layout", variable=vertical,
-            command=lambda: self.apply_live("vertical", vertical.get()),
+            command=lambda: self.toggle_vertical(vertical.get(), scales),
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 3))
 
         row += 1
         alerts = tk.BooleanVar(value=self.s["alerts"])
         ttk.Checkbutton(
-            frame, text="Warn me at 80%% and 95%%", variable=alerts,
+            frame, text="Warn me at 80% and 95%", variable=alerts,
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 3))
 
         row += 1
@@ -1686,6 +1740,33 @@ def selftest():
         assert set(theme) == {"bar", "track", "panel"}, name
         assert all(v.startswith("#") and len(v) == 7 for v in theme.values()), name
 
+    # on-the-hour times drop the ':00' -- '4am', not '4:00am'
+    four_am = time.mktime((2026, 8, 2, 4, 0, 0, 0, 0, -1))
+    quarter_past = time.mktime((2026, 8, 2, 4, 15, 0, 0, 0, -1))
+    midday = time.mktime((2026, 8, 2, 12, 0, 0, 0, 0, -1))
+    midnight_exact = time.mktime((2026, 8, 2, 0, 0, 0, 0, 0, -1))
+    assert format_clock(four_am) == "4am", format_clock(four_am)
+    assert format_clock(quarter_past) == "4:15am", format_clock(quarter_past)
+    assert format_clock(midday) == "12pm", format_clock(midday)
+    assert format_clock(midnight_exact) == "12am", format_clock(midnight_exact)
+    a_different_day = time.mktime((2026, 7, 30, 9, 0, 0, 0, 0, -1))
+    assert format_reset_time(four_am, a_different_day) == "Sun 4am"
+
+    # bar length is bounded by the work area on whichever axis it runs along
+    screen = (0, 0, 1920, 1040)  # 1040: taskbar already excluded by rcWork
+    assert max_bar_length(screen, 0, False) == 1920
+    assert max_bar_length(screen, 0, True) == 1040
+    assert max_bar_length(screen, 10, False) == 1900, "padding eats into it"
+    # a tiny or silly work area still yields something drawable
+    assert max_bar_length((0, 0, 10, 10), 50, False) == MIN_BAR_LENGTH
+
+    # geometry honours a custom length rather than the default constant
+    assert widget_size(0, 3, 0, False, 500) == (500, 6)
+    assert widget_size(0, 3, 0, True, 500) == (6, 500)
+    assert bar_rect(0, 500, 0, 0, 3, 0, False, 500) == (0, 0, 500, 3)
+    # vertical still anchors the fill to the foot at a custom length
+    assert bar_rect(0, 125, 0, 0, 3, 0, True, 500) == (0, 375, 3, 500)
+
     # orientation: vertical is the horizontal case with its axes transposed
     pad, thick, space = 6, 3, 5
     wide = widget_size(pad, thick, space, False)
@@ -1834,7 +1915,15 @@ if __name__ == "__main__":
         log("starting at login")
         time.sleep(STARTUP_DELAY_SECONDS)
     if "--selftest" in sys.argv:
-        selftest()
+        # Report failures on stdout: running a .pyw suppresses stderr, so an
+        # assertion otherwise fails completely silently, with only an exit
+        # code to show for it.
+        try:
+            selftest()
+        except Exception:
+            print("SELFTEST FAILED")
+            traceback.print_exc(file=sys.stdout)
+            sys.exit(1)
     elif "--quit" in sys.argv:
         print("closed" if signal_running_widget(WM_CLOSE) else "not running")
     elif "--reset" in sys.argv:

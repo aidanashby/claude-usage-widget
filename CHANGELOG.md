@@ -15,6 +15,9 @@ trustworthy and well-behaved for someone who didn't write it.
 - **A welcome window on first run**, explaining the two bars and pointing out the tray icon,
   which is otherwise undiscoverable. Shown once.
 - **Colour presets** — `claude`, `monochrome` and `contrast`.
+- **A line length setting**, applying to both bars. It can be dragged up to the full width of
+  your screen, or the full height minus the taskbar when vertical.
+- **"What is this?" in the tray menu**, which reopens the welcome screen at any time.
 - **Click-through**, so the mouse reaches whatever is underneath. Note that this also disables
   the hover tooltip and dragging, since no mouse events reach the widget at all; the tray takes
   over. Stated in the settings window as well as here.
@@ -27,10 +30,17 @@ trustworthy and well-behaved for someone who didn't write it.
 
 ### Changed
 
+- Times landing exactly on the hour lose the redundant minutes: "4am", not "4:00am".
 - **Failed polls now back off** — doubling to a thirty-minute ceiling, honouring `Retry-After`,
   with jitter so that many installations don't retry in the same instant. Previously a failing
   poll simply retried on the same fixed schedule, which is not a reasonable thing to do to an
   endpoint from thousands of machines.
+
+### Fixed
+
+- The alerts checkbox showed "80%% and 95%%" — a literal string carrying escapes it never needed.
+- A failing `--selftest` exited silently: running a `.pyw` suppresses stderr, so the traceback
+  went nowhere and only the exit code betrayed it. Failures now report on stdout.
 
 ## [0.9.0] — 2026-07-30
 
