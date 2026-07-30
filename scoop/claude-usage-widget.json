@@ -1,0 +1,38 @@
+{
+    "version": "1.0.0",
+    "description": "Two bars showing your Claude session and weekly usage limits, always on top.",
+    "homepage": "https://github.com/aidanashby/claude-usage-widget",
+    "license": "MIT",
+    "notes": [
+        "Unsigned build: Windows SmartScreen may warn the first time you run it.",
+        "Verify the download against the .sha256 published with each release.",
+        "Settings live in %APPDATA%\\ClaudeUsageWidget. For a portable install,",
+        "create a file named portable.txt next to ClaudeUsageWidget.exe."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/aidanashby/claude-usage-widget/releases/download/v1.0.0/ClaudeUsageWidget-v1.0.0-win64.zip",
+            "hash": "REPLACED_ON_RELEASE"
+        }
+    },
+    "extract_dir": "ClaudeUsageWidget",
+    "shortcuts": [
+        [
+            "ClaudeUsageWidget.exe",
+            "Claude Usage Widget"
+        ]
+    ],
+    "checkver": {
+        "github": "https://github.com/aidanashby/claude-usage-widget"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/aidanashby/claude-usage-widget/releases/download/v$version/ClaudeUsageWidget-v$version-win64.zip"
+            }
+        },
+        "hash": {
+            "url": "$url.sha256"
+        }
+    }
+}

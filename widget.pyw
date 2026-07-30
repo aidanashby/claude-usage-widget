@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "0.10.0"
+__version__ = "1.0.0"
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -9,9 +9,12 @@ import shutil
 import subprocess
 import sys
 import random
+import re
+import struct
 import threading
 import time
 import traceback
+import webbrowser
 import tkinter as tk
 from collections import namedtuple
 from datetime import datetime
@@ -19,9 +22,46 @@ import urllib.request
 from tkinter import ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SETTINGS_PATH = os.path.join(HERE, "settings.json")
-LOG_PATH = os.path.join(HERE, "widget.log")
+PORTABLE_MARKER = "portable.txt"
+APP_FOLDER = "ClaudeUsageWidget"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+RELEASES_API = (
+    "https://api.github.com/repos/aidanashby/claude-usage-widget/releases/latest"
+)
+RELEASES_PAGE = "https://github.com/aidanashby/claude-usage-widget/releases/latest"
+
+
+def app_dir():
+    """Where the program itself lives -- the exe's folder once packaged."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return HERE
+
+
+def data_dir():
+    """Where settings and the log belong.
+
+    Beside the program if a portable.txt marker is there -- for USB sticks and
+    synced folders -- otherwise the user's roaming profile, because an
+    installed copy may sit somewhere it isn't allowed to write.
+    """
+    here = app_dir()
+    if os.path.exists(os.path.join(here, PORTABLE_MARKER)):
+        return here
+    roaming = os.environ.get("APPDATA")
+    if not roaming:
+        return here  # no profile to speak of; better than nowhere to write
+    folder = os.path.join(roaming, APP_FOLDER)
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        return here
+    return folder
+
+
+DATA_DIR = data_dir()
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+LOG_PATH = os.path.join(DATA_DIR, "widget.log")
 
 ORANGE = "#d17552"
 GREY = "#7a7a7a"
@@ -58,6 +98,7 @@ WM_COMMAND = 0x0111
 WM_TRAY = 0x8000  # WM_APP, our tray callback
 WM_RESET_POSITION = 0x8001  # WM_APP+1, sent by --reset
 MENU_SETTINGS, MENU_RESET, MENU_QUIT, MENU_WELCOME = 1, 2, 3, 4
+MENU_UPDATE = 5
 
 DEFAULTS = {
     "thickness": 3,
@@ -81,6 +122,9 @@ DEFAULTS = {
     "alerted_session": None,
     "alerted_weekly": None,
     "seen_welcome": False,
+    "update_check": True,
+    "last_update_check": 0,
+    "available_version": "",
 }
 
 
@@ -246,6 +290,35 @@ def project_exhaustion(pct, progress, window_seconds, now=None):
     return now + seconds_to_full
 
 
+def parse_version(text):
+    """'v1.2.3' -> (1, 2, 3). Unparseable pieces become 0."""
+    parts = re.findall(r"\d+", str(text or ""))[:3]
+    numbers = [int(p) for p in parts]
+    return tuple(numbers + [0] * (3 - len(numbers))) if numbers else (0, 0, 0)
+
+
+def is_newer(candidate, current):
+    """Compare as numbers, not as text: 0.10.0 is newer than 0.9.0."""
+    return parse_version(candidate) > parse_version(current)
+
+
+def fetch_latest_version():
+    """Latest released tag from GitHub, or None. Sends nothing about the user."""
+    req = urllib.request.Request(
+        RELEASES_API,
+        headers={
+            # GitHub rejects requests without one.
+            "User-Agent": "claude-usage-widget/%s" % __version__,
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.load(r).get("tag_name")
+    except Exception:
+        return None  # offline, rate limited, no releases yet -- all fine
+
+
 def widget_size(padding, thickness, spacing, vertical, length=BAR_LENGTH):
     """Outer size of the widget. Vertical is the horizontal case transposed."""
     long_side = length + padding * 2
@@ -277,7 +350,26 @@ def max_bar_length(rect, padding, vertical):
     return max(MIN_BAR_LENGTH, span - padding * 2)
 
 
+def migrate_settings():
+    """Carry a pre-1.0 settings file over from beside the script, once.
+
+    One-way and non-destructive: the original is left where it is, so an older
+    copy of the widget keeps working if someone still runs one.
+    """
+    legacy = os.path.join(HERE, "settings.json")
+    if os.path.exists(SETTINGS_PATH) or not os.path.exists(legacy):
+        return
+    if os.path.abspath(legacy) == os.path.abspath(SETTINGS_PATH):
+        return
+    try:
+        shutil.copyfile(legacy, SETTINGS_PATH)
+        log("migrated settings from", legacy)
+    except OSError as e:
+        log("could not migrate settings:", e)
+
+
 def load_settings():
+    migrate_settings()
     s = dict(DEFAULTS)
     try:
         with open(SETTINGS_PATH, encoding="utf-8") as f:
@@ -561,11 +653,16 @@ def set_start_on_login(enabled):
 
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
         if enabled:
-            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            if not os.path.exists(pythonw):
-                pythonw = sys.executable
             # --startup makes it wait for the shell before showing up.
-            cmd = '"%s" "%s" --startup' % (pythonw, os.path.abspath(__file__))
+            if getattr(sys, "frozen", False):
+                cmd = '"%s" --startup' % os.path.abspath(sys.executable)
+            else:
+                pythonw = os.path.join(
+                    os.path.dirname(sys.executable), "pythonw.exe"
+                )
+                if not os.path.exists(pythonw):
+                    pythonw = sys.executable
+                cmd = '"%s" "%s" --startup' % (pythonw, os.path.abspath(__file__))
             winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, cmd)
         else:
             try:
@@ -657,6 +754,39 @@ def _bar_icon_bits(size=16):
             else:
                 out += b"\0\0\0\0"
     return bytes(out)
+
+
+def ico_bytes(sizes=(16, 32, 48)):
+    """A multi-size .ico built from the same pixels as the tray icon.
+
+    Two quirks of the format: each image is a BMP whose header height is twice
+    the real height (colour rows plus an AND mask), and its rows run bottom-up
+    while our buffer is top-down.
+    """
+    images = []
+    for size in sizes:
+        top_down = _bar_icon_bits(size)
+        stride = size * 4
+        rows = [top_down[i * stride:(i + 1) * stride] for i in range(size)]
+        pixels = b"".join(reversed(rows))
+        mask_stride = ((size + 31) // 32) * 4  # 1bpp, padded to 4-byte rows
+        mask = b"\0" * (mask_stride * size)
+        header = struct.pack(
+            "<IiiHHIIiiII",
+            40, size, size * 2, 1, 32, 0, len(pixels) + len(mask), 0, 0, 0, 0,
+        )
+        images.append(header + pixels + mask)
+
+    offset = 6 + 16 * len(images)
+    out = [struct.pack("<HHH", 0, 1, len(images))]  # reserved, type 1 = icon
+    for size, image in zip(sizes, images):
+        out.append(struct.pack(
+            "<BBBBHHII",
+            size if size < 256 else 0, size if size < 256 else 0,
+            0, 0, 1, 32, len(image), offset,
+        ))
+        offset += len(image)
+    return b"".join(out + images)
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -878,12 +1008,16 @@ class TrayIcon:
     def _menu(self):
         u = ctypes.windll.user32
         menu = u.CreatePopupMenu()
-        for ident, label in (
+        entries = [
             (MENU_SETTINGS, "Settings"),
             (MENU_RESET, "Reset position"),
             (MENU_WELCOME, "What is this?"),
             (MENU_QUIT, "Quit"),
-        ):
+        ]
+        pending = self.widget.s.get("available_version")
+        if pending and is_newer(pending, __version__):
+            entries.insert(0, (MENU_UPDATE, "Get update (%s)" % pending))
+        for ident, label in entries:
             u.AppendMenuW(menu, 0x0, ident, label)  # MF_STRING
         point = _Point()
         u.GetCursorPos(ctypes.byref(point))
@@ -901,6 +1035,8 @@ class TrayIcon:
             self.widget.reset_position()
         elif choice == MENU_WELCOME:
             self.widget.show_welcome()
+        elif choice == MENU_UPDATE:
+            self.widget.open_release_page()
         elif choice == MENU_QUIT:
             self.widget.quit()
 
@@ -1355,6 +1491,7 @@ class Widget:
             else:
                 failures += 1
                 retry_after = result.retry_after
+            self.maybe_check_update()
             # Backs off while failing and spreads installations out, so a
             # popular copy of this doesn't become a thundering herd.
             delay = backoff_delay(
@@ -1387,6 +1524,43 @@ class Widget:
         else:
             tip = result.reason
         self.tray.set_tooltip("%s\n%s" % (WINDOW_TITLE, tip))
+
+    def maybe_check_update(self):
+        """Once a day at most, ask GitHub whether there's a newer release.
+
+        Runs on the poll thread, so the network wait is off the UI. Never
+        downloads or replaces anything -- it only offers to open the page.
+        """
+        if not self.s["update_check"]:
+            return
+        now = time.time()
+        if now - (self.s["last_update_check"] or 0) < UPDATE_CHECK_SECONDS:
+            return
+        self.s["last_update_check"] = now
+        latest = fetch_latest_version()
+        if not latest or not is_newer(latest, __version__):
+            return
+        if latest == self.s["available_version"]:
+            return  # already told them about this one
+        self.s["available_version"] = latest
+        try:
+            self.root.after(0, self.announce_update, latest)
+        except tk.TclError:
+            pass
+
+    def announce_update(self, latest):
+        save_settings(self.s)
+        self.tray.notify(
+            "Update available",
+            "%s is out — you have %s. Right-click the tray icon to get it."
+            % (latest, __version__),
+        )
+
+    def open_release_page(self):
+        try:
+            webbrowser.open(RELEASES_PAGE)
+        except Exception as e:
+            log("could not open the releases page:", e)
 
     def check_alerts(self):
         """Warn once per threshold per window, via a tray balloon."""
@@ -1563,6 +1737,12 @@ class Widget:
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 3))
 
         row += 1
+        updates = tk.BooleanVar(value=self.s["update_check"])
+        ttk.Checkbutton(
+            frame, text="Check GitHub for updates", variable=updates,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 3))
+
+        row += 1
         click_through = tk.BooleanVar(value=self.s["click_through"])
         ttk.Checkbutton(
             frame, text="Click-through (mouse passes to the window beneath)",
@@ -1596,6 +1776,7 @@ class Widget:
         def save():
             self.s["launch_cmd"] = launch.get().strip()
             self.s["alerts"] = alerts.get()
+            self.s["update_check"] = updates.get()
             if startup.get() != self.s["start_on_login"]:
                 try:
                     set_start_on_login(startup.get())
@@ -1739,6 +1920,56 @@ def selftest():
     for name, theme in THEMES.items():
         assert set(theme) == {"bar", "track", "panel"}, name
         assert all(v.startswith("#") and len(v) == 7 for v in theme.values()), name
+
+    # versions compare as numbers, not text
+    assert parse_version("v1.2.3") == (1, 2, 3)
+    assert parse_version("1.2") == (1, 2, 0)
+    assert parse_version("") == (0, 0, 0) and parse_version(None) == (0, 0, 0)
+    assert is_newer("v0.10.0", "0.9.0"), "10 > 9; string comparison gets this wrong"
+    assert not is_newer("v0.9.0", "0.10.0")
+    assert not is_newer("v1.0.0", "1.0.0"), "same version is not an update"
+    assert is_newer("v1.0.1", "1.0.0") and is_newer("v2.0.0", "1.9.9")
+    assert not is_newer("garbage", __version__)
+
+    # .ico structure: header, one entry per size, offsets that actually line up
+    blob = ico_bytes((16, 32, 48))
+    reserved, kind, count = struct.unpack("<HHH", blob[:6])
+    assert (reserved, kind) == (0, 1), "must declare itself an icon"
+    assert count == 3
+    seen = []
+    for i in range(count):
+        entry = blob[6 + 16 * i:6 + 16 * (i + 1)]
+        width, height, _, _, planes, bpp, size, offset = struct.unpack(
+            "<BBBBHHII", entry
+        )
+        seen.append(width)
+        assert (planes, bpp) == (1, 32)
+        assert offset + size <= len(blob), "image runs past the end of the file"
+        # each image is a BMP header declaring double height, for the AND mask
+        declared_h = struct.unpack("<i", blob[offset + 8:offset + 12])[0]
+        assert declared_h == width * 2, (width, declared_h)
+    assert seen == [16, 32, 48]
+
+    # data_dir: the portable marker wins, otherwise the roaming profile
+    import tempfile
+    real_app_dir = globals()["app_dir"]
+    with tempfile.TemporaryDirectory() as tmp:
+        globals()["app_dir"] = lambda: tmp
+        roaming = os.environ.get("APPDATA")
+        try:
+            os.environ["APPDATA"] = os.path.join(tmp, "roaming")
+            assert data_dir() == os.path.join(tmp, "roaming", APP_FOLDER)
+
+            open(os.path.join(tmp, PORTABLE_MARKER), "w").close()
+            assert data_dir() == tmp, "portable.txt must win"
+
+            os.remove(os.path.join(tmp, PORTABLE_MARKER))
+            os.environ.pop("APPDATA")
+            assert data_dir() == tmp, "no profile: fall back to beside the program"
+        finally:
+            globals()["app_dir"] = real_app_dir
+            if roaming is not None:
+                os.environ["APPDATA"] = roaming
 
     # on-the-hour times drop the ':00' -- '4am', not '4:00am'
     four_am = time.mktime((2026, 8, 2, 4, 0, 0, 0, 0, -1))
@@ -1914,7 +2145,14 @@ if __name__ == "__main__":
         # covers that too, but waiting avoids the flicker.
         log("starting at login")
         time.sleep(STARTUP_DELAY_SECONDS)
-    if "--selftest" in sys.argv:
+    if "--write-icon" in sys.argv:
+        # Used by the build so the packaged icon and the tray icon are the
+        # same pixels, and can't drift apart.
+        target = sys.argv[sys.argv.index("--write-icon") + 1]
+        with open(target, "wb") as f:
+            f.write(ico_bytes())
+        print("wrote", target)
+    elif "--selftest" in sys.argv:
         # Report failures on stdout: running a .pyw suppresses stderr, so an
         # assertion otherwise fails completely silently, with only an exit
         # code to show for it.

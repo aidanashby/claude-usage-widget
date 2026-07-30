@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write      # create the release
+  id-token: write      # sign the provenance attestation
+  attestations: write  # record it
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Self-test
+        run: python widget.pyw --selftest
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build
+        run: python build.py
+
+      # Ties the zip to this exact commit. The build is unsigned by choice, so
+      # this is what lets anyone verify it came from this source:
+      #   gh attestation verify <zip> --repo ${{ github.repository }}
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.zip
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create ${{ github.ref_name }} dist/*.zip dist/*.sha256 --generate-notes

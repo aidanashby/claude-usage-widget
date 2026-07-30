@@ -48,7 +48,7 @@ account, not from an assumed schedule.
 
 ### Hover for reset times
 
-Hovering anywhere on the widget shows both, in words:
+Hovering anywhere on the widget spells it out:
 
 ```
 Current session: resets in 31 min
@@ -63,16 +63,41 @@ The session is a countdown because it's usually close; the weekly is a wall-cloc
 a countdown in days isn't much use. Both keep working while the bars are grey — a reset time
 stays true whether or not the API is reachable.
 
-## Requirements
+## Install
 
-- Windows
-- Python 3.8+ (tkinter included — it ships with the standard python.org installer)
-- Claude installed and signed in — either the desktop app or the Claude Code CLI, since both
-  share the same stored credentials
+You need Windows, and Claude installed and signed in — either the desktop app or the Claude
+Code CLI, since both share the same stored credentials.
 
-No third-party packages. Everything used is standard library.
+### Download it
 
-## Install and run
+Get the zip from [Releases](https://github.com/aidanashby/claude-usage-widget/releases),
+unpack it anywhere, and run `ClaudeUsageWidget.exe`. No Python needed, no installer, nothing
+written outside your own profile.
+
+**Windows will warn you the first time.** The build isn't code-signed — certificates cost money
+and this is a free personal project — so SmartScreen shows "Windows protected your PC". Click
+**More info → Run anyway** if you're happy to.
+
+You don't have to take that on faith. Every release is built in public by GitHub Actions from a
+tagged commit, with a provenance attestation, so you can confirm the zip really came from this
+source:
+
+```bash
+gh attestation verify ClaudeUsageWidget-v1.0.0-win64.zip --repo aidanashby/claude-usage-widget
+```
+
+A `.sha256` is published alongside each zip too.
+
+### Or with Scoop
+
+```bash
+scoop install https://raw.githubusercontent.com/aidanashby/claude-usage-widget/main/scoop/claude-usage-widget.json
+```
+
+### Or run the source
+
+One file, standard library only, no third-party packages. Needs Python 3.8+ with tkinter, which
+the standard python.org installer includes.
 
 ```bash
 git clone https://github.com/aidanashby/claude-usage-widget.git
@@ -81,6 +106,12 @@ pythonw widget.pyw
 ```
 
 Use `pythonw`, not `python` — that's what keeps a console window from appearing behind it.
+
+### Where it keeps things
+
+Settings and the log live in `%APPDATA%\ClaudeUsageWidget`. For a portable install — a USB
+stick, or a synced folder — put a file named `portable.txt` beside the program and it keeps
+everything local instead.
 
 To have it start with Windows, open the settings and tick **Open on startup** (off by default).
 That writes a `ClaudeUsageWidget` value to
@@ -130,18 +161,20 @@ pythonw widget.pyw --quit
 
 Both act on the running widget and report `not running` if there isn't one.
 
-In Task Manager the process appears as `pythonw.exe`. To tell it apart from other Python
-programs, switch to the **Details** tab, right-click the column headers, choose **Select
-columns**, and enable **Command line** — the widget's row shows `widget.pyw`.
+In Task Manager the packaged build appears as `ClaudeUsageWidget.exe`. Running from source it's
+`pythonw.exe`; to tell it apart from other Python programs, switch to the **Details** tab,
+right-click the column headers, choose **Select columns**, and enable **Command line** — the
+widget's row shows `widget.pyw`.
 
 ## When something goes wrong
 
-The widget writes to `widget.log` beside the script. It runs under `pythonw.exe`, which has no
-console and no error output of its own, so the log is the only place problems are recorded —
-check it first. An empty or missing log means nothing has gone wrong.
+The widget writes to `widget.log` in `%APPDATA%\ClaudeUsageWidget` (or beside the program in
+portable mode). It runs without a console and has no error output of its own, so the log is the
+only place problems are recorded — check it first. An empty or missing log means nothing has
+gone wrong.
 
-If the widget vanishes without writing anything to the log, the failure was below Python: check
-**Event Viewer → Windows Logs → Application** for a `pythonw.exe` entry at that time.
+If it vanishes without writing anything to the log, the failure was below Python: check
+**Event Viewer → Windows Logs → Application** for an entry at that time.
 
 ## Settings
 
@@ -160,11 +193,12 @@ window) puts everything back as it was.
 | Vertical layout | off | Tall strip instead of a wide one |
 | Warn me at 80% and 95% | on | Tray notification, once per threshold per window |
 | Click-through | off | Mouse passes through — see the warning below |
+| Check GitHub for updates | on | Daily; tells you, never installs |
 | Open on startup | off | Registry `Run` entry |
 | Launch command | auto-detected on first use | What a grey-state click runs |
 
-Everything is written to `settings.json` beside the script, along with the last known usage
-values and the widget's position. Delete that file to reset to defaults.
+Everything is written to `settings.json` in `%APPDATA%\ClaudeUsageWidget`, along with the last
+known usage values and the widget's position. Delete that file to reset to defaults.
 
 **Opacity caveat:** tkinter applies one alpha value to the entire window, so the bars fade
 along with the panel — they aren't independently opaque. Getting true per-element opacity
@@ -277,7 +311,9 @@ call into Tk: it runs inside a ctypes callback nested in Tk's own event loop, an
 re-entrant, so doing so aborts the process with no Python traceback. Queue the action and let
 `_pump` run it.
 
-The whole thing is one file, `widget.pyw`. Release history is in [CHANGELOG.md](CHANGELOG.md).
+The whole thing is one file, `widget.pyw`. `build.py` packages it with PyInstaller; CI runs the
+self-test on every push and builds a release on every `v*` tag. Release history is in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Security and privacy
 

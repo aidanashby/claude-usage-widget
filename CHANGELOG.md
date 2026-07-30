@@ -3,6 +3,31 @@
 All notable changes to this project are documented here. Versions follow
 [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [1.0.0] — 2026-07-30
+
+Makes the widget installable by people who don't have Python.
+
+### Added
+
+- **A downloadable Windows build.** A zip on Releases containing a standalone
+  `ClaudeUsageWidget.exe` — no Python, no installer. Built by GitHub Actions from a tagged
+  commit with a provenance attestation and a published SHA-256, so an unsigned build can still
+  be verified against its source.
+- **A Scoop manifest**, for installing and updating from the command line.
+- **An update check**, once a day against the GitHub releases API. It tells you and adds a tray
+  menu item; it never downloads or replaces anything. Switchable off, and documented in
+  SECURITY.md, which now names both addresses the widget contacts.
+- **Portable mode** — a `portable.txt` file beside the program keeps settings local.
+- **CI**: the self-test runs on every push and pull request.
+
+### Changed
+
+- **Settings and the log moved to `%APPDATA%\ClaudeUsageWidget`.** An installed program can't
+  rely on being able to write beside itself. An existing `settings.json` next to the script is
+  migrated automatically the first time, leaving the original untouched.
+- The startup registry entry points at the executable when running a packaged build, rather
+  than at `pythonw.exe` and a script that isn't there.
+
 ## [0.10.0] — 2026-07-30
 
 The first release aimed at people other than its author. Everything here is about being usable,
@@ -152,6 +177,7 @@ First release. Two thin bars showing Claude session (rolling 5-hour) and weekly 
   Claude to refresh the token
 - Single instance only
 
+[1.0.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v1.0.0
 [0.10.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.10.0
 [0.9.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.9.0
 [0.8.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.8.0

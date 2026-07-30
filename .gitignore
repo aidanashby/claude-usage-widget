@@ -2,3 +2,8 @@ settings.json
 widget.log
 __pycache__/
 *.pyc
+build/
+dist/
+icon.ico
+_entry.py
+*.spec
