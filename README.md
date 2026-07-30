@@ -1,9 +1,25 @@
 # Claude Usage Widget
 
-A small always-on-top desktop widget for Windows showing how much of your Claude usage limits
-you've spent: two thin bars, session and weekly, and nothing else.
+**It gives you two bars.**
 
-No labels, no numbers, no window chrome. It sits in a corner of your screen and you glance at it.
+Claude limits how much you can use it — one limit that resets every five hours, and another
+that resets weekly. Normally you can only check those by asking inside Claude, which means
+finding out you're nearly out of usage at the worst possible moment.
+
+This puts both limits on your screen permanently, as two thin bars in a corner:
+
+- The **top bar** fills up as you use your current five-hour session.
+- The **bottom bar** fills up as you use your week.
+
+That's the whole idea. No numbers, no labels, no window to manage — just two bars you glance at
+while you work. Hover over them if you want the details.
+
+It's about 130 pixels wide and 20 tall, sits on top of your other windows, and stays out of the
+way.
+
+> **Not affiliated with Anthropic.** This is an unofficial personal project. It isn't made,
+> endorsed, sponsored, or supported by Anthropic, and "Claude" is their trademark, used here
+> only to describe what the tool shows you.
 
 ## What the bars mean
 
@@ -37,7 +53,11 @@ Hovering anywhere on the widget shows both, in words:
 ```
 Current session: resets in 31 min
 Weekly limit: resets Sun 8:45am
+At this rate: session limit reached by 4:12pm
 ```
+
+The third line projects forward from how fast you're currently spending. It says "On pace" when
+both limits are tracking to last their windows.
 
 The session is a countdown because it's usually close; the weekly is a wall-clock time because
 a countdown in days isn't much use. Both keep working while the bars are grey — a reset time
@@ -134,7 +154,10 @@ window) puts everything back as it was.
 | Padding from edge | 6px | Panel padding around the bars |
 | Background opacity | 0.7 | See the caveat below |
 | Distance from screen edge | 12px | How far off the edge it parks |
+| Colours | claude | `claude`, `monochrome`, or `contrast` |
 | Vertical layout | off | Tall strip instead of a wide one |
+| Warn me at 80% and 95% | on | Tray notification, once per threshold per window |
+| Click-through | off | Mouse passes through — see the warning below |
 | Open on startup | off | Registry `Run` entry |
 | Launch command | auto-detected on first use | What a grey-state click runs |
 
@@ -146,6 +169,16 @@ along with the panel — they aren't independently opaque. Getting true per-elem
 would mean Win32 layered windows via ctypes, which wasn't worth the complexity. At the default
 0.7 the orange still reads clearly.
 
+**Click-through caveat:** when it's on, the widget ignores the mouse completely. Clicks reach
+whatever is underneath, which is the point — but it also means you can't drag it, and the hover
+tooltip can't appear, because no mouse events reach it at all. Everything moves to the tray
+icon: settings, reset position, quit, and the percentages in its own tooltip.
+
+## Warnings
+
+By default you get a notification the first time you cross 80% and 95% of each limit, once per
+window. Turn them off with **Warn me at 80% and 95%** in settings.
+
 ## Where the data comes from
 
 The widget polls `GET https://api.anthropic.com/api/oauth/usage` every five minutes, reading
@@ -155,6 +188,10 @@ Claude session, plus each window's `resets_at`.
 Five minutes rather than one: the endpoint rate-limits, and polling every minute got roughly
 one request in three rejected. The markers don't need it either, since they're redrawn from
 the cached reset times every 30 seconds without touching the network.
+
+When a request does fail, the wait doubles each time up to a thirty-minute ceiling, honours a
+`Retry-After` if the server sends one, and adds a little randomness so that many copies of this
+running on many machines don't all retry in the same instant.
 
 Claude does **not** need to be running for this to work.
 
@@ -240,6 +277,14 @@ re-entrant, so doing so aborts the process with no Python traceback. Queue the a
 
 The whole thing is one file, `widget.pyw`. Release history is in [CHANGELOG.md](CHANGELOG.md).
 
+## Security and privacy
+
+It reads the token Claude already stores on your machine and sends one request to one Anthropic
+address. No telemetry, no analytics, no third-party network access. Full detail, and how to
+verify it yourself in one command, is in [SECURITY.md](SECURITY.md).
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
+
+Not affiliated with, endorsed by, or sponsored by Anthropic.

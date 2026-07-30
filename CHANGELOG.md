@@ -3,6 +3,35 @@
 All notable changes to this project are documented here. Versions follow
 [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [0.10.0] — 2026-07-30
+
+The first release aimed at people other than its author. Everything here is about being usable,
+trustworthy and well-behaved for someone who didn't write it.
+
+### Added
+
+- **Warnings at 80% and 95%** of each limit, as tray notifications, once per threshold per
+  window. On by default, and switchable off.
+- **A welcome window on first run**, explaining the two bars and pointing out the tray icon,
+  which is otherwise undiscoverable. Shown once.
+- **Colour presets** — `claude`, `monochrome` and `contrast`.
+- **Click-through**, so the mouse reaches whatever is underneath. Note that this also disables
+  the hover tooltip and dragging, since no mouse events reach the widget at all; the tray takes
+  over. Stated in the settings window as well as here.
+- **A burn-rate line in the tooltip**: "At this rate: session limit reached by 4:12pm", or "On
+  pace" when both limits are tracking to last their windows.
+- **`SECURITY.md`** — what it reads, the single address it talks to, what it never does, and a
+  one-line command to verify that for yourself.
+- **A non-affiliation notice**, and a plain-language explanation of what the widget is at the
+  top of the README.
+
+### Changed
+
+- **Failed polls now back off** — doubling to a thirty-minute ceiling, honouring `Retry-After`,
+  with jitter so that many installations don't retry in the same instant. Previously a failing
+  poll simply retried on the same fixed schedule, which is not a reasonable thing to do to an
+  endpoint from thousands of machines.
+
 ## [0.9.0] — 2026-07-30
 
 ### Added
@@ -113,6 +142,7 @@ First release. Two thin bars showing Claude session (rolling 5-hour) and weekly 
   Claude to refresh the token
 - Single instance only
 
+[0.10.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.10.0
 [0.9.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.9.0
 [0.8.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.8.0
 [0.7.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.7.0

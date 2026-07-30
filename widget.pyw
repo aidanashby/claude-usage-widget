@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import random
 import threading
 import time
 import traceback
@@ -33,6 +34,17 @@ SESSION_WINDOW_SECONDS = 5 * 3600
 WEEKLY_WINDOW_SECONDS = 7 * 24 * 3600
 MARKER_ON_TRACK = "#ffffff"
 MARKER_ON_FILL = "#000000"
+MAX_BACKOFF_SECONDS = 30 * 60
+ALERT_THRESHOLDS = (80, 95)
+UPDATE_CHECK_SECONDS = 24 * 3600
+
+# Bar, track and panel colours. draw() reads these rather than constants so a
+# preset can change the look without touching the drawing code.
+THEMES = {
+    "claude": {"bar": "#d17552", "track": "#3a3a3a", "panel": "#000000"},
+    "monochrome": {"bar": "#d0d0d0", "track": "#333333", "panel": "#000000"},
+    "contrast": {"bar": "#ffff00", "track": "#4d4d4d", "panel": "#000000"},
+}
 STARTUP_DELAY_SECONDS = 8
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "ClaudeUsageWidget"
@@ -61,6 +73,12 @@ DEFAULTS = {
     "edge": "right",
     "last_session_reset": None,
     "last_weekly_reset": None,
+    "theme": "claude",
+    "click_through": False,
+    "alerts": True,
+    "alerted_session": None,
+    "alerted_weekly": None,
+    "seen_welcome": False,
 }
 
 
@@ -143,16 +161,84 @@ def format_countdown(seconds):
     return "in %dh" % hours if mins == 0 else "in %dh %dmin" % (hours, mins)
 
 
-def format_reset_time(epoch):
-    """Local wall-clock reset, e.g. 'Sun 8:45am'."""
+def format_clock(epoch):
+    """Just the time, e.g. '8:45am'."""
+    lt = time.localtime(epoch)
+    hour = lt.tm_hour % 12 or 12  # 0 -> 12am, 12 -> 12pm
+    return "%d:%02d%s" % (hour, lt.tm_min, "am" if lt.tm_hour < 12 else "pm")
+
+
+def format_reset_time(epoch, now=None):
+    """Local wall-clock reset, e.g. 'Sun 8:45am' -- or just '8:45am' if today.
+
+    Naming the day is useful a week out and noise half an hour out.
+    """
     if not epoch:
         return "at an unknown time"
     lt = time.localtime(epoch)
-    hour = lt.tm_hour % 12 or 12  # 0 -> 12am, 12 -> 12pm
-    return "%s %d:%02d%s" % (
-        time.strftime("%a", lt), hour, lt.tm_min,
-        "am" if lt.tm_hour < 12 else "pm",
-    )
+    today = time.localtime(time.time() if now is None else now)
+    if (lt.tm_year, lt.tm_yday) == (today.tm_year, today.tm_yday):
+        return format_clock(epoch)
+    return "%s %s" % (time.strftime("%a", lt), format_clock(epoch))
+
+
+def backoff_delay(failures, retry_after=None, base=None, jitter=0.0):
+    """How long to wait before the next poll attempt.
+
+    Doubles per consecutive failure up to a ceiling, and honours a server's
+    Retry-After when it gives one. The jitter fraction keeps many installations
+    from synchronising into a burst -- passed in rather than drawn here so the
+    result stays testable.
+    """
+    base = POLL_SECONDS if base is None else base
+    if failures <= 0:
+        delay = base
+    else:
+        delay = min(MAX_BACKOFF_SECONDS, base * (2 ** min(failures, 16)))
+    if retry_after:
+        delay = max(delay, min(MAX_BACKOFF_SECONDS, retry_after))
+    return max(1.0, delay * (1.0 + jitter))
+
+
+def parse_retry_after(value):
+    """Seconds from a Retry-After header. Only the numeric form; None if absent."""
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def due_alerts(pct, reset_epoch, already, thresholds=ALERT_THRESHOLDS):
+    """Which thresholds this reading has newly crossed.
+
+    `already` is the bookkeeping from settings: [reset_epoch, [fired...]]. A
+    different reset means a new window, so everything is eligible again.
+    """
+    window, fired = (already or [None, []])[:2]
+    if window != reset_epoch:
+        fired = []
+    due = [t for t in thresholds if pct >= t and t not in fired]
+    return due, [reset_epoch, sorted(set(fired) | set(due))]
+
+
+def project_exhaustion(pct, progress, window_seconds, now=None):
+    """When usage would reach 100% at the current rate, or None.
+
+    None means either not enough of the window has elapsed to judge, or the
+    projection lands after the window resets anyway -- both mean "on pace".
+    """
+    if not progress or progress <= 0.02 or pct <= 0:
+        return None  # too early in the window for the rate to mean anything
+    if pct >= 100:
+        return now if now is not None else time.time()
+    now = time.time() if now is None else now
+    elapsed = window_seconds * progress
+    remaining_window = window_seconds - elapsed
+    seconds_to_full = (100.0 - pct) * (elapsed / pct)
+    if seconds_to_full >= remaining_window:
+        return None  # won't run out before it resets
+    return now + seconds_to_full
 
 
 def widget_size(padding, thickness, spacing, vertical):
@@ -325,14 +411,16 @@ def find_token():
 
 
 Usage = namedtuple("Usage", "session weekly session_reset weekly_reset")
+Failure = namedtuple("Failure", "reason retry_after")
 
 
 def fetch_usage():
-    """Return a Usage, or a short string saying why it couldn't be read.
+    """Return a Usage, or a Failure saying why it couldn't be read.
 
-    The string is what the tray tooltip shows: being rate limited is a very
+    The reason is what the tray tooltip shows: being rate limited is a very
     different situation from having no credentials, and telling the user to
-    start Claude in the first case is just wrong.
+    start Claude in the first case is just wrong. retry_after carries the
+    server's own request when it makes one.
 
     Uses the OAuth token Claude already stores. Deliberately does not refresh
     it -- racing Claude's own refresh can invalidate its session. Launching
@@ -340,7 +428,7 @@ def fetch_usage():
     """
     token = find_token()
     if not token:
-        return "no Claude credentials found"
+        return Failure("no Claude credentials found", None)
     req = urllib.request.Request(
         USAGE_URL,
         headers={
@@ -359,14 +447,15 @@ def fetch_usage():
             parse_reset(data["seven_day"].get("resets_at")),
         )
     except urllib.error.HTTPError as e:
+        retry_after = parse_retry_after(e.headers.get("Retry-After"))
         if e.code == 429:
-            return "rate limited by the API — will retry"
+            return Failure("rate limited by the API — will retry", retry_after)
         if e.code in (401, 403):
-            return "Claude credentials rejected — sign in again"
-        return "usage request failed (HTTP %s)" % e.code
+            return Failure("Claude credentials rejected — sign in again", None)
+        return Failure("usage request failed (HTTP %s)" % e.code, retry_after)
     except Exception:
         # ponytail: offline, DNS, schema drift -- all just mean "go grey"
-        return "usage unavailable"
+        return Failure("usage unavailable", None)
 
 
 class _Rect(ctypes.Structure):
@@ -707,6 +796,23 @@ class TrayIcon:
         self.data.szTip = text[:127]
         ctypes.windll.shell32.Shell_NotifyIconW(1, ctypes.byref(self.data))  # NIM_MODIFY
 
+    def notify(self, title, message):
+        """Balloon from the tray icon. Windows renders these as toasts."""
+        if not self.ok:
+            return
+        try:
+            self.data.uFlags |= 0x10  # NIF_INFO
+            self.data.szInfoTitle = title[:63]
+            self.data.szInfo = message[:255]
+            self.data.dwInfoFlags = 0x1  # NIIF_INFO
+            ctypes.windll.shell32.Shell_NotifyIconW(1, ctypes.byref(self.data))
+        except Exception as e:
+            log_exception("tray notification", e)
+        finally:
+            # Clear, or every later NIM_MODIFY re-shows the same balloon.
+            self.data.uFlags &= ~0x10
+            self.data.szInfo = ""
+
     def remove(self):
         if not self.ok:
             return
@@ -945,6 +1051,9 @@ class Widget:
         self.tooltip = Tooltip(self)
         self.root.after(2000, self.watch_layout)
         self.root.after(MARKER_REFRESH_MS, self.tick_marker)
+        self.apply_click_through()
+        if not self.s["seen_welcome"]:
+            self.root.after(400, self.show_welcome)
         threading.Thread(target=self.poll_loop, daemon=True).start()
 
     # --- geometry / drawing ---
@@ -960,7 +1069,11 @@ class Widget:
         self.canvas.delete("all")
         p, t, sp = self.s["padding"], self.s["thickness"], self.s["spacing"]
         vertical = self.s["vertical"]
-        colour = ORANGE if self.live else GREY
+        theme = THEMES.get(self.s["theme"], THEMES["claude"])
+        self.canvas.configure(bg=theme["panel"])
+        self.root.configure(bg=theme["panel"])
+        colour = theme["bar"] if self.live else GREY
+        track = theme["track"]
         # Session first: the top bar horizontally, the left one vertically.
         bars = (
             (self.session, self.s["last_session_reset"], SESSION_WINDOW_SECONDS),
@@ -970,7 +1083,7 @@ class Widget:
             def rect(a0, a1, index=i):
                 return bar_rect(a0, a1, index, p, t, sp, vertical)
 
-            self.canvas.create_rectangle(*rect(0, BAR_LENGTH), fill=TRACK, width=0)
+            self.canvas.create_rectangle(*rect(0, BAR_LENGTH), fill=track, width=0)
             fill = BAR_LENGTH * max(0.0, min(100.0, pct)) / 100.0
             if fill > 0:
                 self.canvas.create_rectangle(*rect(0, fill), fill=colour, width=0)
@@ -1036,17 +1149,115 @@ class Widget:
         self.ensure_visible()
         self.root.after(2000, self.watch_layout)
 
+    def apply_click_through(self):
+        """Let the mouse pass through to whatever is underneath.
+
+        Costs the hover tooltip -- with no mouse events reaching the canvas it
+        can never fire -- so the tray becomes the only way in. Stated in the
+        settings window and the README, since it otherwise reads as a bug.
+        """
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = self.root.winfo_id()
+            # Under overrideredirect winfo_id can be the child; the toplevel is
+            # its parent when so.
+            parent = user32.GetParent(hwnd)
+            if parent:
+                hwnd = parent
+            get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+            set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+            get_long.restype = ctypes.c_ssize_t
+            get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+            set_long.restype = ctypes.c_ssize_t
+            set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+            style = get_long(hwnd, -20)  # GWL_EXSTYLE
+            transparent = 0x20 | 0x80000  # WS_EX_TRANSPARENT | WS_EX_LAYERED
+            if self.s["click_through"]:
+                style |= transparent
+            else:
+                style &= ~0x20  # keep LAYERED: the alpha setting relies on it
+            set_long(hwnd, -20, style)
+            if self.s["click_through"]:
+                self.tooltip.hide()
+        except Exception as e:
+            log_exception("click-through", e)
+
     def tooltip_lines(self):
         """Two lines: the session as a countdown, the week as a wall-clock time."""
         session = self.s["last_session_reset"]
         weekly = self.s["last_weekly_reset"]
-        return [
+        lines = [
             "Current session: resets %s" % (
                 format_countdown(session - time.time()) if session
                 else "at an unknown time"
             ),
             "Weekly limit: resets %s" % format_reset_time(weekly),
         ]
+        lines.append(self.pace_line())
+        return lines
+
+    def pace_line(self):
+        """Whichever limit runs out first at the current rate, or 'on pace'."""
+        soonest, soonest_label = None, ""
+        for label, pct, reset, window in (
+            ("session", self.session, self.s["last_session_reset"],
+             SESSION_WINDOW_SECONDS),
+            ("weekly", self.weekly, self.s["last_weekly_reset"],
+             WEEKLY_WINDOW_SECONDS),
+        ):
+            hit = project_exhaustion(pct, window_progress(reset, window), window)
+            if hit is not None and (soonest is None or hit < soonest):
+                soonest, soonest_label = hit, label
+        if soonest is None:
+            return "On pace — both limits should last their windows"
+        return "At this rate: %s limit reached by %s" % (
+            soonest_label, format_reset_time(soonest)
+        )
+
+    def show_welcome(self):
+        """Once, on first run. The tray icon is undiscoverable otherwise."""
+        self.s["seen_welcome"] = True
+        save_settings(self.s)
+        win = tk.Toplevel(self.root)
+        win.title(WINDOW_TITLE)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Two bars, and that's it.",
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        for line in (
+            "The top bar is your current Claude session — the rolling 5-hour limit.",
+            "The bottom bar is your weekly limit.",
+            "",
+            "The thin line in each bar shows how far through that window you are."
+            " If a bar is ahead of its line, you're using it faster than the clock.",
+            "",
+            "Hover for reset times. Right-click for settings.",
+            "It also sits in your system tray — right-click there for settings,"
+            " to recall it if you lose it, or to quit.",
+        ):
+            ttk.Label(frame, text=line, wraplength=380, justify="left").pack(
+                anchor="w", pady=(0, 2)
+            )
+
+        startup = tk.BooleanVar(value=self.s["start_on_login"])
+        ttk.Checkbutton(frame, text="Start with Windows",
+                        variable=startup).pack(anchor="w", pady=(12, 0))
+
+        def close():
+            if startup.get() != self.s["start_on_login"]:
+                try:
+                    set_start_on_login(startup.get())
+                    self.s["start_on_login"] = startup.get()
+                    save_settings(self.s)
+                except OSError as e:
+                    log("startup registry write failed:", e)
+            win.destroy()
+
+        ttk.Button(frame, text="Got it", command=close).pack(anchor="e", pady=(14, 0))
+        win.protocol("WM_DELETE_WINDOW", close)
 
     def reset_position(self):
         """Put the widget back top-right of the primary monitor."""
@@ -1079,6 +1290,7 @@ class Widget:
         # Waits on an Event rather than sleeping: a daemon thread parked in
         # time.sleep wakes up during interpreter shutdown to find the GIL gone,
         # which ends the process with a fatal error instead of a clean exit.
+        failures = 0
         while not self.stopping.is_set():
             result = fetch_usage()
             if self.stopping.is_set():
@@ -1087,7 +1299,23 @@ class Widget:
                 self.root.after(0, self.apply_usage, result)
             except tk.TclError:
                 return  # window went away mid-poll
-            self.stopping.wait(POLL_SECONDS)
+
+            if isinstance(result, Usage):
+                failures = 0
+                retry_after = None
+            else:
+                failures += 1
+                retry_after = result.retry_after
+            # Backs off while failing and spreads installations out, so a
+            # popular copy of this doesn't become a thundering herd.
+            delay = backoff_delay(
+                failures, retry_after, jitter=random.uniform(-0.1, 0.1)
+            )
+            # First failure, then every fifth: enough to diagnose, not a spam log.
+            if failures and (failures == 1 or failures % 5 == 0):
+                log("poll failed (%s); next attempt in %d min"
+                    % (result.reason, round(delay / 60)))
+            self.stopping.wait(delay)
 
     def apply_usage(self, result):
         self.live = isinstance(result, Usage)
@@ -1106,9 +1334,34 @@ class Widget:
         # The bars are deliberately unlabelled, so the tooltip carries the numbers.
         if self.live:
             tip = "Session %d%%  ·  Weekly %d%%" % (self.session, self.weekly)
+            self.check_alerts()
         else:
-            tip = str(result)
+            tip = result.reason
         self.tray.set_tooltip("%s\n%s" % (WINDOW_TITLE, tip))
+
+    def check_alerts(self):
+        """Warn once per threshold per window, via a tray balloon."""
+        if not self.s["alerts"]:
+            return
+        for label, pct, reset, key, window in (
+            ("Session", self.session, self.s["last_session_reset"],
+             "alerted_session", SESSION_WINDOW_SECONDS),
+            ("Weekly", self.weekly, self.s["last_weekly_reset"],
+             "alerted_weekly", WEEKLY_WINDOW_SECONDS),
+        ):
+            due, state = due_alerts(pct, reset, self.s[key])
+            if state != self.s[key]:
+                self.s[key] = state
+                save_settings(self.s)
+            for threshold in due:
+                when = (
+                    format_countdown(reset - time.time()) if reset
+                    else "at an unknown time"
+                )
+                self.tray.notify(
+                    "%s limit %d%% used" % (label, threshold),
+                    "%s resets %s." % (label, when),
+                )
 
     # --- drag / snap ---
 
@@ -1191,6 +1444,10 @@ class Widget:
             self.root.attributes("-alpha", value)
         elif key == "edge_gap":
             self.reposition()
+        elif key == "click_through":
+            self.apply_click_through()
+        elif key == "theme":
+            self.draw()
         else:
             self.layout()
             self.reposition()  # size changed, so the edge offset needs redoing
@@ -1230,11 +1487,41 @@ class Widget:
             update()
 
         row = len(sliders)
+        ttk.Label(frame, text="Colours").grid(row=row, column=0, sticky="w", pady=3)
+        theme = tk.StringVar(value=self.s["theme"])
+        ttk.Combobox(
+            frame, textvariable=theme, state="readonly", width=14,
+            values=sorted(THEMES),
+        ).grid(row=row, column=1, padx=8, sticky="w")
+        theme.trace_add("write", lambda *_: self.apply_live("theme", theme.get()))
+
+        row += 1
         vertical = tk.BooleanVar(value=self.s["vertical"])
         ttk.Checkbutton(
             frame, text="Vertical layout", variable=vertical,
             command=lambda: self.apply_live("vertical", vertical.get()),
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 3))
+
+        row += 1
+        alerts = tk.BooleanVar(value=self.s["alerts"])
+        ttk.Checkbutton(
+            frame, text="Warn me at 80%% and 95%%", variable=alerts,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 3))
+
+        row += 1
+        click_through = tk.BooleanVar(value=self.s["click_through"])
+        ttk.Checkbutton(
+            frame, text="Click-through (mouse passes to the window beneath)",
+            variable=click_through,
+            command=lambda: self.apply_live("click_through", click_through.get()),
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 0))
+        row += 1
+        ttk.Label(
+            frame, foreground="#777777", wraplength=330, justify="left",
+            text="While click-through is on the widget ignores the mouse, so the"
+                 " hover tooltip won't appear and you can't drag it. Use the tray"
+                 " icon for settings, to move it back, or to quit.",
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
         row += 1
         startup = tk.BooleanVar(value=self.s["start_on_login"])
@@ -1254,6 +1541,7 @@ class Widget:
 
         def save():
             self.s["launch_cmd"] = launch.get().strip()
+            self.s["alerts"] = alerts.get()
             if startup.get() != self.s["start_on_login"]:
                 try:
                     set_start_on_login(startup.get())
@@ -1266,6 +1554,7 @@ class Widget:
         def cancel():
             self.s.update(before)
             self.root.attributes("-alpha", self.s["alpha"])
+            self.apply_click_through()
             self.layout()
             self.reposition()
             save_settings(self.s)
@@ -1346,6 +1635,57 @@ def selftest():
     # a stranded position is off every monitor, so it must not survive as-is
     assert not (primary[0] <= -30000 <= primary[2])
 
+    # backoff: steady when healthy, doubling while failing, capped
+    assert backoff_delay(0, base=300) == 300
+    assert backoff_delay(1, base=300) == 600
+    assert backoff_delay(2, base=300) == 1200
+    assert backoff_delay(99, base=300) == MAX_BACKOFF_SECONDS, "must cap"
+    # a server's Retry-After wins when it asks for longer, and is itself capped
+    assert backoff_delay(0, retry_after=900, base=300) == 900
+    assert backoff_delay(0, retry_after=10, base=300) == 300, "never poll sooner"
+    assert backoff_delay(0, retry_after=99999, base=300) == MAX_BACKOFF_SECONDS
+    # jitter stays within its band and never yields a nonsense delay
+    assert backoff_delay(0, base=300, jitter=0.1) == 330
+    assert backoff_delay(0, base=300, jitter=-0.1) == 270
+    assert backoff_delay(0, base=0.001, jitter=-0.99) >= 1.0
+
+    assert parse_retry_after("120") == 120
+    assert parse_retry_after(None) is None
+    assert parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT") is None  # date form
+    assert parse_retry_after("-5") is None
+
+    # alerts: each threshold fires once, and a new window makes them eligible again
+    due, state = due_alerts(85, 1000, None)
+    assert due == [80], due
+    assert due_alerts(85, 1000, state)[0] == [], "must not re-fire in same window"
+    due, state = due_alerts(96, 1000, state)
+    assert due == [95]
+    assert due_alerts(96, 1000, state)[0] == []
+    # crossing both at once fires both, once
+    assert due_alerts(99, 2000, None)[0] == [80, 95]
+    # the same percentage in a NEW window fires again
+    assert due_alerts(85, 3000, state)[0] == [80], "new window must reset"
+    assert due_alerts(50, 1000, None)[0] == []
+
+    # burn rate: only meaningful once some of the window has elapsed
+    now = 1_000_000.0
+    assert project_exhaustion(50, 0.0, SESSION_WINDOW_SECONDS, now) is None
+    assert project_exhaustion(50, 0.01, SESSION_WINDOW_SECONDS, now) is None
+    # spending exactly in step with the clock lasts the window: on pace
+    assert project_exhaustion(50, 0.5, SESSION_WINDOW_SECONDS, now) is None
+    # burning twice as fast as the clock runs out before the window does
+    hit = project_exhaustion(50, 0.25, SESSION_WINDOW_SECONDS, now)
+    assert hit is not None and now < hit < now + SESSION_WINDOW_SECONDS
+    # half the usage rate of the clock is comfortably on pace
+    assert project_exhaustion(25, 0.5, SESSION_WINDOW_SECONDS, now) is None
+    # already spent
+    assert project_exhaustion(100, 0.5, SESSION_WINDOW_SECONDS, now) == now
+
+    # every theme defines every colour the drawing code asks for
+    for name, theme in THEMES.items():
+        assert set(theme) == {"bar", "track", "panel"}, name
+        assert all(v.startswith("#") and len(v) == 7 for v in theme.values()), name
+
     # orientation: vertical is the horizontal case with its axes transposed
     pad, thick, space = 6, 3, 5
     wide = widget_size(pad, thick, space, False)
@@ -1410,11 +1750,15 @@ def selftest():
     midnight = time.mktime((2026, 8, 2, 0, 5, 0, 0, 0, -1))
     noon = time.mktime((2026, 8, 2, 12, 5, 0, 0, 0, -1))
     morning = time.mktime((2026, 8, 2, 8, 45, 0, 0, 0, -1))
-    assert format_reset_time(midnight).endswith("12:05am"), format_reset_time(midnight)
-    assert format_reset_time(noon).endswith("12:05pm"), format_reset_time(noon)
-    assert format_reset_time(morning).endswith("8:45am"), format_reset_time(morning)
-    assert format_reset_time(morning).startswith("Sun "), format_reset_time(morning)
+    other_day = time.mktime((2026, 7, 30, 9, 0, 0, 0, 0, -1))
+    assert format_reset_time(midnight, other_day).endswith("12:05am")
+    assert format_reset_time(noon, other_day).endswith("12:05pm")
+    assert format_reset_time(morning, other_day).endswith("8:45am")
+    assert format_reset_time(morning, other_day).startswith("Sun ")
     assert format_reset_time(None) == "at an unknown time"
+    # same calendar day drops the day name, which is noise half an hour out
+    assert format_reset_time(morning, morning) == "8:45am"
+    assert format_clock(noon) == "12:05pm" and format_clock(midnight) == "12:05am"
 
     # ISO parsing, including the 'Z' form fromisoformat only took in 3.11
     assert parse_reset("2026-08-02T03:00:00.543041+00:00") == parse_reset(
