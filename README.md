@@ -315,6 +315,11 @@ The whole thing is one file, `widget.pyw`. `build.py` packages it with PyInstall
 self-test on every push and builds a release on every `v*` tag. Release history is in
 [CHANGELOG.md](CHANGELOG.md).
 
+Before changing anything, read [`.planning/`](.planning/) — architecture, the decisions behind
+choices that look arbitrary, a roadmap, and a list of gotchas that each cost real debugging
+time. [`.planning/GOTCHAS.md`](.planning/GOTCHAS.md) in particular will save you an afternoon
+if you go near the tray or anything Win32.
+
 ## Security and privacy
 
 It reads the token Claude already stores on your machine and sends one request to one Anthropic
