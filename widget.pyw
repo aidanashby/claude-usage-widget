@@ -10,12 +10,14 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 import urllib.request
 from tkinter import ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(HERE, "settings.json")
+LOG_PATH = os.path.join(HERE, "widget.log")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 ORANGE = "#d17552"
@@ -23,6 +25,7 @@ GREY = "#7a7a7a"
 TRACK = "#3a3a3a"
 BAR_LENGTH = 120
 POLL_SECONDS = 60
+STARTUP_DELAY_SECONDS = 8
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "ClaudeUsageWidget"
 WINDOW_TITLE = "Claude Usage Widget"
@@ -58,6 +61,33 @@ def single_instance():
     return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
 
 
+def log(*parts):
+    """Append a line to widget.log. Never raises.
+
+    Under pythonw.exe with no console, sys.stderr is None, so printing to it
+    from an exception handler raises AttributeError and turns a handled error
+    into a fatal one. A log file is also the only way to see what happened
+    when the app is started by Windows at login.
+    """
+    try:
+        line = "%s  %s\n" % (
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            " ".join(str(p) for p in parts),
+        )
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+def log_exception(kind, exc):
+    log("%s: %s" % (kind, exc))
+    try:
+        log(traceback.format_exc().rstrip())
+    except Exception:
+        pass
+
+
 def load_settings():
     s = dict(DEFAULTS)
     try:
@@ -73,7 +103,7 @@ def save_settings(s):
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(s, f, indent=2)
     except OSError as e:
-        print("could not save settings:", e, file=sys.stderr)
+        log("could not save settings:", e)
 
 
 def detect_launch_cmd():
@@ -326,7 +356,8 @@ def set_start_on_login(enabled):
             pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
             if not os.path.exists(pythonw):
                 pythonw = sys.executable
-            cmd = '"%s" "%s"' % (pythonw, os.path.abspath(__file__))
+            # --startup makes it wait for the shell before showing up.
+            cmd = '"%s" "%s" --startup' % (pythonw, os.path.abspath(__file__))
             winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, cmd)
         else:
             try:
@@ -366,40 +397,108 @@ def _declare_win32():
         wintypes.HMENU, ctypes.c_uint, ctypes.c_int, ctypes.c_int,
         ctypes.c_int, wintypes.HWND, ctypes.c_void_p,
     ]
+    # GDI/shell calls too. Handle values routinely exceed 32 bits, so an
+    # undeclared call raises OverflowError -- which previously discarded a
+    # perfectly good icon and fell back to the stock one.
+    g.CreateBitmap.argtypes = [
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p,
+    ]
     g.CreateBitmap.restype = wintypes.HBITMAP
+    g.CreateDIBSection.argtypes = [
+        wintypes.HDC, ctypes.POINTER(BITMAPINFOHEADER), ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD,
+    ]
+    g.CreateDIBSection.restype = wintypes.HBITMAP
+    g.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    g.DeleteObject.restype = wintypes.BOOL
+    u.CreateIconIndirect.argtypes = [ctypes.POINTER(ICONINFO)]
+    u.CreateIconIndirect.restype = wintypes.HICON
+    u.GetSystemMetrics.argtypes = [ctypes.c_int]
+    u.GetSystemMetrics.restype = ctypes.c_int
+    u.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
+    u.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+    u.RegisterWindowMessageW.restype = ctypes.c_uint
+    u.SetForegroundWindow.argtypes = [wintypes.HWND]
+    u.AppendMenuW.argtypes = [
+        wintypes.HMENU, ctypes.c_uint, ctypes.c_size_t, wintypes.LPCWSTR,
+    ]
+    u.DestroyMenu.argtypes = [wintypes.HMENU]
+    u.GetCursorPos.argtypes = [ctypes.POINTER(_Point)]
+    ctypes.windll.shell32.Shell_NotifyIconW.argtypes = [
+        wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATA),
+    ]
+    ctypes.windll.shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 
 
-def _bar_icon_bits():
-    """16x16 BGRA buffer: two orange bars on transparent, echoing the widget."""
+def _bar_icon_bits(size=16):
+    """Square BGRA buffer: two orange bars on transparent, echoing the widget."""
     r, g, b = int(ORANGE[1:3], 16), int(ORANGE[3:5], 16), int(ORANGE[5:7], 16)
-    rows = []
-    for y in range(16):
-        row = bytearray()
-        drawn = y in (5, 6, 7, 9, 10, 11)
-        for x in range(16):
-            if drawn and 2 <= x <= 13:
-                row += bytes((b, g, r, 255))
+    # Proportional to the icon so it reads the same at any DPI.
+    thick = max(1, size // 6)
+    gap = max(1, size // 8)
+    inset = max(1, size // 8)
+    top = (size - (thick * 2 + gap)) // 2
+    bar_rows = set(range(top, top + thick)) | set(
+        range(top + thick + gap, top + thick * 2 + gap)
+    )
+    out = bytearray()
+    for y in range(size):
+        for x in range(size):
+            if y in bar_rows and inset <= x < size - inset:
+                out += bytes((b, g, r, 255))
             else:
-                row += b"\0\0\0\0"
-        rows.append(bytes(row))
-    return b"".join(rows)
+                out += b"\0\0\0\0"
+    return bytes(out)
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+class ICONINFO(ctypes.Structure):
+    _fields_ = [
+        ("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD),
+        ("yHotspot", wintypes.DWORD), ("hbmMask", wintypes.HBITMAP),
+        ("hbmColor", wintypes.HBITMAP),
+    ]
 
 
 def _make_icon():
-    """Build the tray icon, or fall back to the stock application icon."""
+    """Build the tray icon, or fall back to the stock application icon.
+
+    Uses a DIB section rather than CreateBitmap: a 32bpp device-dependent
+    bitmap with alpha is unreliable, and when it failed the icon silently
+    became the generic Python one.
+    """
     u, g = ctypes.windll.user32, ctypes.windll.gdi32
-
-    class ICONINFO(ctypes.Structure):
-        _fields_ = [
-            ("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD),
-            ("yHotspot", wintypes.DWORD), ("hbmMask", wintypes.HBITMAP),
-            ("hbmColor", wintypes.HBITMAP),
-        ]
-
     try:
-        bits = _bar_icon_bits()
-        colour = g.CreateBitmap(16, 16, 1, 32, bits)
-        mask = g.CreateBitmap(16, 16, 1, 1, b"\0" * 64)
+        size = u.GetSystemMetrics(49) or 16  # SM_CXSMICON
+        header = BITMAPINFOHEADER()
+        header.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        header.biWidth = size
+        header.biHeight = -size  # negative: top-down, matching our buffer
+        header.biPlanes = 1
+        header.biBitCount = 32
+        header.biCompression = 0  # BI_RGB
+
+        g.CreateDIBSection.restype = wintypes.HBITMAP
+        pixels = ctypes.c_void_p()
+        colour = g.CreateDIBSection(
+            None, ctypes.byref(header), 0, ctypes.byref(pixels), None, 0
+        )
+        if not colour or not pixels:
+            raise OSError("CreateDIBSection failed")
+        bits = _bar_icon_bits(size)
+        ctypes.memmove(pixels, bits, len(bits))
+
+        mask = g.CreateBitmap(size, size, 1, 1, None)  # 1bpp, contents unused
         info = ICONINFO(True, 0, 0, mask, colour)
         u.CreateIconIndirect.restype = wintypes.HICON
         icon = u.CreateIconIndirect(ctypes.byref(info))
@@ -407,8 +506,9 @@ def _make_icon():
         g.DeleteObject(mask)
         if icon:
             return icon
-    except Exception:
-        pass  # ponytail: a generic tray icon beats no tray icon
+        raise OSError("CreateIconIndirect failed")
+    except Exception as e:
+        log("falling back to the stock tray icon:", e)
     return u.LoadIconW(None, ctypes.c_wchar_p(32512))  # IDI_APPLICATION
 
 
@@ -430,11 +530,14 @@ class TrayIcon:
     def __init__(self, widget):
         self.widget = widget
         self.ok = False
+        self.pending = []
+        self.taskbar_created = 0
+        self.hwnd = None
         try:
             self._build()
             self.ok = True
         except Exception as e:
-            print("tray icon unavailable:", e, file=sys.stderr)
+            log_exception("tray icon unavailable", e)
             return
         self._pump()
 
@@ -442,6 +545,11 @@ class TrayIcon:
         _declare_win32()
         u, k = ctypes.windll.user32, ctypes.windll.kernel32
         hinst = k.GetModuleHandleW(None)
+
+        # Broadcast the shell sends when the taskbar appears: at login it can
+        # arrive after we do, and it arrives again whenever Explorer restarts.
+        # Registered before the window exists so no broadcast is missed.
+        self.taskbar_created = u.RegisterWindowMessageW("TaskbarCreated")
 
         # Held on the instance: Windows keeps the raw pointer, so letting the
         # callback object be collected would crash the process later.
@@ -476,7 +584,16 @@ class TrayIcon:
         self.data.uCallbackMessage = WM_TRAY
         self.data.hIcon = self.icon
         self.data.szTip = WINDOW_TITLE
-        ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(self.data))  # NIM_ADD
+        self._add_icon()
+
+    def _add_icon(self):
+        """Register with the tray. Safe to call again after the shell restarts."""
+        shell = ctypes.windll.shell32
+        shell.Shell_NotifyIconW(2, ctypes.byref(self.data))  # NIM_DELETE, if stale
+        if not shell.Shell_NotifyIconW(0, ctypes.byref(self.data)):  # NIM_ADD
+            # Usually means the shell isn't up yet; TaskbarCreated will tell us
+            # when it is. Not fatal -- the widget itself works regardless.
+            log("tray icon not accepted yet; waiting for the shell")
 
     def set_tooltip(self, text):
         if not self.ok:
@@ -491,19 +608,47 @@ class TrayIcon:
         ctypes.windll.shell32.Shell_NotifyIconW(2, ctypes.byref(self.data))  # NIM_DELETE
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
-        u = ctypes.windll.user32
-        if msg == WM_TRAY:
-            event = lparam & 0xFFFF
-            if event == 0x0205:  # WM_RBUTTONUP
+        """Record what happened and return. Never touch Tk from in here.
+
+        This runs inside DispatchMessageW, inside the pump, inside a Tk 'after'
+        callback. Calling back into Tk at that depth -- opening a Toplevel, say
+        -- crashes the process, because Tk is not re-entrant. Everything real
+        happens in _pump once this has returned.
+        """
+        try:
+            if msg == WM_TRAY:
+                event = lparam & 0xFFFF
+                if event == 0x0205:  # WM_RBUTTONUP
+                    self.pending.append("menu")
+                elif event == 0x0203:  # WM_LBUTTONDBLCLK
+                    self.pending.append("settings")
+            elif msg == WM_RESET_POSITION:
+                self.pending.append("reset")
+            elif msg == self.taskbar_created:
+                # The shell has (re)started -- our icon went with it.
+                self.pending.append("readd")
+            elif msg == WM_CLOSE:
+                self.pending.append("quit")
+                return 0
+        except Exception as e:
+            log_exception("window procedure", e)
+        return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _dispatch(self, action):
+        """Run a queued action from clean Tk context."""
+        try:
+            if action == "menu":
                 self._menu()
-            elif event == 0x0203:  # WM_LBUTTONDBLCLK
+            elif action == "settings":
                 self.widget.open_settings()
-        elif msg == WM_RESET_POSITION:
-            self.widget.reset_position()
-        elif msg == WM_CLOSE:
-            self.widget.quit()
-            return 0
-        return u.DefWindowProcW(hwnd, msg, wparam, lparam)
+            elif action == "reset":
+                self.widget.reset_position()
+            elif action == "readd":
+                self._add_icon()
+            elif action == "quit":
+                self.widget.quit()
+        except Exception as e:
+            log_exception("tray action %r" % action, e)
 
     def _menu(self):
         u = ctypes.windll.user32
@@ -532,16 +677,22 @@ class TrayIcon:
             self.widget.quit()
 
     def _pump(self):
-        """Drain our window's messages from Tk's loop.
+        """Drain our window's messages from Tk's loop, then run what they asked for.
 
         Filtered to self.hwnd on purpose: an unfiltered PeekMessage would steal
-        messages out from under Tk's own event loop.
+        messages out from under Tk's own event loop. Queued actions are run
+        after the dispatch loop, so Tk work never happens inside the wndproc.
         """
         u = ctypes.windll.user32
         msg = wintypes.MSG()
-        while u.PeekMessageW(ctypes.byref(msg), self.hwnd, 0, 0, 1):  # PM_REMOVE
-            u.TranslateMessage(ctypes.byref(msg))
-            u.DispatchMessageW(ctypes.byref(msg))
+        try:
+            while u.PeekMessageW(ctypes.byref(msg), self.hwnd, 0, 0, 1):  # PM_REMOVE
+                u.TranslateMessage(ctypes.byref(msg))
+                u.DispatchMessageW(ctypes.byref(msg))
+        except Exception as e:
+            log_exception("tray pump", e)
+        while self.pending:
+            self._dispatch(self.pending.pop(0))
         if self.ok:
             self.widget.root.after(50, self._pump)
 
@@ -586,6 +737,16 @@ class Widget:
             ("<Button-3>", lambda e: self.open_settings()),
         ):
             self.canvas.bind(seq, fn)
+
+        install_error_logging(self.root)
+
+        # Rewrite the Run entry if it's enabled, so an entry written by an
+        # older version picks up the current command line.
+        if self.s["start_on_login"]:
+            try:
+                set_start_on_login(True)
+            except OSError as e:
+                log("could not refresh the startup entry:", e)
 
         self.layout()
         self.place_initial()
@@ -763,7 +924,7 @@ class Widget:
             # command line they own, not untrusted input.
             subprocess.Popen(cmd, shell=True)
         except OSError as e:
-            print("launch failed:", e, file=sys.stderr)
+            log("launch failed:", e)
 
     def snap(self):
         x, y = self.root.winfo_x(), self.root.winfo_y()
@@ -861,7 +1022,7 @@ class Widget:
                     set_start_on_login(startup.get())
                     self.s["start_on_login"] = startup.get()
                 except OSError as e:
-                    print("startup registry write failed:", e, file=sys.stderr)
+                    log("startup registry write failed:", e)
             save_settings(self.s)
             win.destroy()
 
@@ -948,10 +1109,30 @@ def selftest():
     # a stranded position is off every monitor, so it must not survive as-is
     assert not (primary[0] <= -30000 <= primary[2])
 
-    # tray icon buffer: 16x16 pixels, 4 bytes each
-    bits = _bar_icon_bits()
-    assert len(bits) == 16 * 16 * 4
-    assert any(bits[i + 3] for i in range(0, len(bits), 4)), "icon fully transparent"
+    # tray icon buffer: square, 4 bytes a pixel, at whatever size is asked for
+    for size in (16, 20, 32):
+        bits = _bar_icon_bits(size)
+        assert len(bits) == size * size * 4
+        opaque = [i for i in range(0, len(bits), 4) if bits[i + 3]]
+        assert opaque, "icon fully transparent at size %d" % size
+        # two separate bars, so the opaque rows must come in two runs
+        rows = sorted({(i // 4) // size for i in opaque})
+        runs = 1 + sum(1 for a, b in zip(rows, rows[1:]) if b - a > 1)
+        assert runs == 2, "expected two bars at size %d, got %d" % (size, runs)
+
+    # queued tray actions run once each, and a bad one can't take the rest down
+    class FakeTray:
+        pending = ["reset", "boom", "settings"]
+        done = []
+        _dispatch = TrayIcon._dispatch
+        widget = type("W", (), {
+            "reset_position": lambda self: FakeTray.done.append("reset"),
+            "open_settings": lambda self: FakeTray.done.append("settings"),
+        })()
+    fake = FakeTray()
+    while fake.pending:
+        fake._dispatch(fake.pending.pop(0))
+    assert FakeTray.done == ["reset", "settings"], FakeTray.done
 
     # easing: anchored at both ends, monotonic, and front-loaded
     assert ease_out(0) == 0 and ease_out(1) == 1
@@ -964,7 +1145,27 @@ def selftest():
     print("selftest ok")
 
 
+def install_error_logging(root=None):
+    """Route unhandled errors to widget.log.
+
+    Without this they go to sys.stderr, which is None under pythonw -- so a
+    crash at login leaves no trace anywhere.
+    """
+    sys.excepthook = lambda kind, exc, tb: log_exception("unhandled", exc)
+    if root is not None:
+        root.report_callback_exception = lambda kind, exc, tb: log_exception(
+            "callback", exc
+        )
+
+
 if __name__ == "__main__":
+    install_error_logging()
+    if "--startup" in sys.argv:
+        # Launched by Windows at login: the shell often isn't ready yet, and a
+        # tray icon registered too early is silently dropped. TaskbarCreated
+        # covers that too, but waiting avoids the flicker.
+        log("starting at login")
+        time.sleep(STARTUP_DELAY_SECONDS)
     if "--selftest" in sys.argv:
         selftest()
     elif "--quit" in sys.argv:

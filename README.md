@@ -36,7 +36,9 @@ Use `pythonw`, not `python` — that's what keeps a console window from appearin
 
 To have it start with Windows, open the settings and tick **Open on startup** (off by default).
 That writes a `ClaudeUsageWidget` value to
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and unticking removes it.
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and unticking removes it. The entry adds
+a `--startup` flag, which makes the widget wait a few seconds for the desktop to finish loading
+before it appears — tray icons registered too early are silently dropped by the shell.
 
 ## Using it
 
@@ -82,6 +84,15 @@ Both act on the running widget and report `not running` if there isn't one.
 In Task Manager the process appears as `pythonw.exe`. To tell it apart from other Python
 programs, switch to the **Details** tab, right-click the column headers, choose **Select
 columns**, and enable **Command line** — the widget's row shows `widget.pyw`.
+
+## When something goes wrong
+
+The widget writes to `widget.log` beside the script. It runs under `pythonw.exe`, which has no
+console and no error output of its own, so the log is the only place problems are recorded —
+check it first. An empty or missing log means nothing has gone wrong.
+
+If the widget vanishes without writing anything to the log, the failure was below Python: check
+**Event Viewer → Windows Logs → Application** for a `pythonw.exe` entry at that time.
 
 ## Settings
 
