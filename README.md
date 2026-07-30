@@ -12,6 +12,10 @@ No labels, no numbers, no window chrome. It sits in a corner of your screen and 
 | Top | **Session** — your rolling 5-hour usage window |
 | Bottom | **Weekly** — your 7-day usage window |
 
+Turning on **Vertical layout** in the settings stands the widget on end, which suits parking it
+against a left or right screen edge. The bars then sit side by side and fill upward like a
+gauge, with session on the left.
+
 Bar length is percentage of that limit consumed. Orange (`#d17552`) means the reading is live.
 Grey means usage couldn't be read just now, and the bars are showing the last known values.
 
@@ -130,6 +134,7 @@ window) puts everything back as it was.
 | Padding from edge | 6px | Panel padding around the bars |
 | Background opacity | 0.7 | See the caveat below |
 | Distance from screen edge | 12px | How far off the edge it parks |
+| Vertical layout | off | Tall strip instead of a wide one |
 | Open on startup | off | Registry `Run` entry |
 | Launch command | auto-detected on first use | What a grey-state click runs |
 

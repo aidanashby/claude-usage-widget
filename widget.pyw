@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -53,6 +53,7 @@ DEFAULTS = {
     "alpha": 0.7,
     "edge_gap": 12,
     "start_on_login": False,
+    "vertical": False,
     "launch_cmd": "",
     "last_session": 0.0,
     "last_weekly": 0.0,
@@ -152,6 +153,29 @@ def format_reset_time(epoch):
         time.strftime("%a", lt), hour, lt.tm_min,
         "am" if lt.tm_hour < 12 else "pm",
     )
+
+
+def widget_size(padding, thickness, spacing, vertical):
+    """Outer size of the widget. Vertical is the horizontal case transposed."""
+    long_side = BAR_LENGTH + padding * 2
+    short_side = thickness * 2 + spacing + padding * 2
+    return (short_side, long_side) if vertical else (long_side, short_side)
+
+
+def bar_rect(along0, along1, index, padding, thickness, spacing, vertical):
+    """Canvas rectangle for part of a bar, in along/across terms.
+
+    'along' is distance from the bar's start on its long axis, 'across' is its
+    thickness. Keeping every rectangle in those terms means orientation is
+    handled exactly once, here, instead of throughout the drawing code.
+    """
+    across0 = padding + index * (thickness + spacing)
+    across1 = across0 + thickness
+    if vertical:
+        # Bottom-up, so along counts from the foot of the bar.
+        foot = padding + BAR_LENGTH
+        return (across0, foot - along1, across1, foot - along0)
+    return (padding + along0, across0, padding + along1, across1)
 
 
 def load_settings():
@@ -845,15 +869,25 @@ class Tooltip:
             log_exception("tooltip", e)
 
     def _place(self, win):
-        """Below the widget, flipped above if there's no room, always on screen."""
+        """Alongside the widget's long edge, flipped if there's no room.
+
+        A wide widget gets the tooltip below it; a tall one gets it to the
+        side, which is where the room actually is once it's parked against a
+        left or right screen edge.
+        """
         tw, th = win.winfo_reqwidth(), win.winfo_reqheight()
         wx, wy = self.widget.root.winfo_x(), self.widget.root.winfo_y()
         left, top, right, bottom = self.widget.current_rect(wx, wy)
-        y = wy + self.widget.h + 6
-        if y + th > bottom:
-            y = wy - th - 6
-        x = max(left, min(wx, right - tw))
-        return (x, max(top, min(y, bottom - th)))
+        gap = 6
+        if self.widget.s["vertical"]:
+            x, y = wx + self.widget.w + gap, wy
+            if x + tw > right:
+                x = wx - tw - gap
+        else:
+            x, y = wx, wy + self.widget.h + gap
+            if y + th > bottom:
+                y = wy - th - gap
+        return (max(left, min(x, right - tw)), max(top, min(y, bottom - th)))
 
     def hide(self):
         self.cancel()
@@ -917,8 +951,7 @@ class Widget:
 
     def layout(self):
         p, t, sp = self.s["padding"], self.s["thickness"], self.s["spacing"]
-        self.w = BAR_LENGTH + p * 2
-        self.h = t * 2 + sp + p * 2
+        self.w, self.h = widget_size(p, t, sp, self.s["vertical"])
         self.canvas.configure(width=self.w, height=self.h)
         self.root.geometry("%dx%d" % (self.w, self.h))
         self.draw()
@@ -926,29 +959,29 @@ class Widget:
     def draw(self):
         self.canvas.delete("all")
         p, t, sp = self.s["padding"], self.s["thickness"], self.s["spacing"]
+        vertical = self.s["vertical"]
         colour = ORANGE if self.live else GREY
+        # Session first: the top bar horizontally, the left one vertically.
         bars = (
             (self.session, self.s["last_session_reset"], SESSION_WINDOW_SECONDS),
             (self.weekly, self.s["last_weekly_reset"], WEEKLY_WINDOW_SECONDS),
         )
         for i, (pct, reset, window) in enumerate(bars):
-            top = p + i * (t + sp)
-            self.canvas.create_rectangle(
-                p, top, p + BAR_LENGTH, top + t, fill=TRACK, width=0
-            )
+            def rect(a0, a1, index=i):
+                return bar_rect(a0, a1, index, p, t, sp, vertical)
+
+            self.canvas.create_rectangle(*rect(0, BAR_LENGTH), fill=TRACK, width=0)
             fill = BAR_LENGTH * max(0.0, min(100.0, pct)) / 100.0
             if fill > 0:
-                self.canvas.create_rectangle(
-                    p, top, p + fill, top + t, fill=colour, width=0
-                )
+                self.canvas.create_rectangle(*rect(0, fill), fill=colour, width=0)
             # How far through the window we are: black over the spent portion,
             # white over the empty track, so it reads against either.
             progress = window_progress(reset, window)
             if progress is not None:
-                x = p + min(BAR_LENGTH - 1, BAR_LENGTH * progress)
+                at = min(BAR_LENGTH - 1, BAR_LENGTH * progress)
                 self.canvas.create_rectangle(
-                    x, top, x + 1, top + t, width=0,
-                    fill=MARKER_ON_FILL if x < p + fill else MARKER_ON_TRACK,
+                    *rect(at, at + 1), width=0,
+                    fill=MARKER_ON_FILL if at < fill else MARKER_ON_TRACK,
                 )
 
     def current_rect(self, x=None, y=None):
@@ -1197,9 +1230,16 @@ class Widget:
             update()
 
         row = len(sliders)
+        vertical = tk.BooleanVar(value=self.s["vertical"])
+        ttk.Checkbutton(
+            frame, text="Vertical layout", variable=vertical,
+            command=lambda: self.apply_live("vertical", vertical.get()),
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 3))
+
+        row += 1
         startup = tk.BooleanVar(value=self.s["start_on_login"])
         ttk.Checkbutton(frame, text="Open on startup", variable=startup).grid(
-            row=row, column=0, columnspan=3, sticky="w", pady=(8, 3)
+            row=row, column=0, columnspan=3, sticky="w", pady=(0, 3)
         )
 
         row += 1
@@ -1305,6 +1345,44 @@ def selftest():
     assert top_right_of(right_mon, w, h, 0) == (3840 - w, 0)
     # a stranded position is off every monitor, so it must not survive as-is
     assert not (primary[0] <= -30000 <= primary[2])
+
+    # orientation: vertical is the horizontal case with its axes transposed
+    pad, thick, space = 6, 3, 5
+    wide = widget_size(pad, thick, space, False)
+    tall = widget_size(pad, thick, space, True)
+    assert wide == (BAR_LENGTH + 12, 3 * 2 + 5 + 12)
+    assert tall == (wide[1], wide[0]), (wide, tall)
+
+    def rect(a0, a1, index, vertical):
+        return bar_rect(a0, a1, index, pad, thick, space, vertical)
+
+    quarter = BAR_LENGTH * 0.25
+    # horizontal: full-length track, and a 25% fill sitting on the LEFT
+    assert rect(0, BAR_LENGTH, 0, False) == (pad, pad, pad + BAR_LENGTH, pad + thick)
+    x0, y0, x1, y1 = rect(0, quarter, 0, False)
+    assert (x0, x1) == (pad, pad + quarter), "horizontal fill should start at the left"
+    # second bar sits below the first
+    assert rect(0, BAR_LENGTH, 1, False)[1] == pad + thick + space
+
+    # vertical: full-height track, and a 25% fill sitting at the BOTTOM
+    assert rect(0, BAR_LENGTH, 0, True) == (pad, pad, pad + thick, pad + BAR_LENGTH)
+    x0, y0, x1, y1 = rect(0, quarter, 0, True)
+    assert y1 == pad + BAR_LENGTH, "vertical fill must be anchored to the foot"
+    assert y0 == pad + BAR_LENGTH - quarter, "vertical fill must grow upward"
+    assert (x0, x1) == (pad, pad + thick)
+    # second bar sits to the RIGHT, which puts the session bar on the left
+    assert rect(0, BAR_LENGTH, 1, True)[0] == pad + thick + space
+    assert rect(0, BAR_LENGTH, 1, True)[1] == pad, "bars share the same top"
+
+    # a 100% fill covers its track exactly, and an empty one has no area
+    for vert in (False, True):
+        assert rect(0, BAR_LENGTH, 0, vert) == rect(0, BAR_LENGTH, 0, vert)
+        empty = rect(0, 0, 0, vert)
+        assert empty[0] == empty[2] or empty[1] == empty[3], empty
+        # every rectangle stays inside the widget
+        w, h = widget_size(pad, thick, space, vert)
+        for r in (rect(0, BAR_LENGTH, 1, vert), rect(0, quarter, 1, vert)):
+            assert 0 <= r[0] <= r[2] <= w and 0 <= r[1] <= r[3] <= h, r
 
     # window progress: derived from the reset time and a fixed window length
     now = 1_000_000.0

@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Versions follow
 [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [0.9.0] — 2026-07-30
+
+### Added
+
+- **Vertical layout** setting, off by default. Stands the widget on end as a tall strip, which
+  suits a left or right screen edge. The bars sit side by side and fill upward like a gauge,
+  session on the left. The hover tooltip moves to the side of the widget rather than below it,
+  flipping to whichever side has room.
+
 ## [0.8.0] — 2026-07-30
 
 Shows how far through each limit window you are, not just how much you've spent.
@@ -104,6 +113,7 @@ First release. Two thin bars showing Claude session (rolling 5-hour) and weekly 
   Claude to refresh the token
 - Single instance only
 
+[0.9.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.9.0
 [0.8.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.8.0
 [0.7.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.7.0
 [0.6.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.6.0
