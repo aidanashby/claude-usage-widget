@@ -2179,7 +2179,12 @@ if __name__ == "__main__":
     elif not single_instance():
         # Already running: recall it, in case it was launched again because it
         # couldn't be found on screen.
-        signal_running_widget(WM_RESET_POSITION)
+        if not signal_running_widget(WM_RESET_POSITION):
+            # Mutex held but no window found -- a stuck process from a prior
+            # crash/kill is holding the lock. Recall does nothing visible, so
+            # log it rather than exiting silently with no trace anywhere.
+            log("mutex held but no window found -- a stale process may be "
+                "stuck; check Task Manager for pythonw.exe/ClaudeUsageWidget.exe")
         sys.exit(0)
     else:
         Widget().run()

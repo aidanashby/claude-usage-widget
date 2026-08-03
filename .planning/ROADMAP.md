@@ -27,7 +27,7 @@ to `microsoft/winget-pkgs` and is easier to justify once signed.
 - **Configurable alert thresholds.** Fixed at 80% and 95%. Nobody has asked yet; wait until
   someone does.
 - **A custom bar colour** beyond the three presets. Common request for desktop widgets, and
-  cheap. It was offered and declined once already.
+  cheap.
 - **Multiple monitors for the position watchdog.** Snapping is per-monitor, but "recall to
   primary" is always the primary. Fine, and someone will eventually want "recall to the monitor
   it was on".
