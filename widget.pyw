@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -83,8 +83,8 @@ UPDATE_CHECK_SECONDS = 24 * 3600
 # preset can change the look without touching the drawing code.
 THEMES = {
     "claude": {"bar": "#d17552", "track": "#3a3a3a", "panel": "#000000"},
-    "monochrome": {"bar": "#d0d0d0", "track": "#333333", "panel": "#000000"},
-    "contrast": {"bar": "#ffff00", "track": "#4d4d4d", "panel": "#000000"},
+    "monochrome": {"bar": "#ffffff", "track": "#000000", "panel": "#000000"},
+    "contrast": {"bar": "#ffb000", "track": "#4d4d4d", "panel": "#000000"},
 }
 STARTUP_DELAY_SECONDS = 8
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"

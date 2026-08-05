@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Versions follow
 [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [1.0.2] — 2026-08-05
+
+### Changed
+
+- The **contrast** theme's bar is now amber rather than a bright lemon yellow — still high
+  contrast against black, easier to look at, and no longer close to the grey the bar goes
+  when the widget can't read your usage.
+- The **monochrome** theme is now straight black and white: a white bar on a black panel.
+
 ## [1.0.1] — 2026-07-30
 
 ### Fixed
