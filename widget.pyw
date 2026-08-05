@@ -84,7 +84,7 @@ UPDATE_CHECK_SECONDS = 24 * 3600
 THEMES = {
     "claude": {"bar": "#d17552", "track": "#3a3a3a", "panel": "#000000"},
     "monochrome": {"bar": "#ffffff", "track": "#000000", "panel": "#000000"},
-    "contrast": {"bar": "#ffb000", "track": "#4d4d4d", "panel": "#000000"},
+    "contrast": {"bar": "#fab219", "track": "#4d4d4d", "panel": "#000000"},
 }
 STARTUP_DELAY_SECONDS = 8
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
