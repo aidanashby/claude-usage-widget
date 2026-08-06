@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 import ctypes
 import ctypes.wintypes as wintypes

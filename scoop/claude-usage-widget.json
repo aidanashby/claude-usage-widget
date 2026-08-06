@@ -1,5 +1,5 @@
 {
-    "version": "1.0.2",
+    "version": "1.0.3",
     "description": "Two bars showing your Claude session and weekly usage limits, always on top.",
     "homepage": "https://github.com/aidanashby/claude-usage-widget",
     "license": "MIT",
@@ -11,8 +11,8 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/aidanashby/claude-usage-widget/releases/download/v1.0.2/ClaudeUsageWidget-v1.0.2-win64.zip",
-            "hash": "https://github.com/aidanashby/claude-usage-widget/releases/download/v1.0.2/ClaudeUsageWidget-v1.0.2-win64.zip.sha256"
+            "url": "https://github.com/aidanashby/claude-usage-widget/releases/download/v1.0.3/ClaudeUsageWidget-v1.0.3-win64.zip",
+            "hash": "https://github.com/aidanashby/claude-usage-widget/releases/download/v1.0.3/ClaudeUsageWidget-v1.0.3-win64.zip.sha256"
         }
     },
     "extract_dir": "ClaudeUsageWidget",

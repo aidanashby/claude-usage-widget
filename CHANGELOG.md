@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Versions follow
 [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [1.0.3] — 2026-08-06
+
+### Changed
+
+- The hover tooltip's third line no longer projects a limit that's already spent. At 100% it
+  reported "session limit reached by" the current time, which was both obvious and wrong —
+  it now says when the widget first saw 100%, e.g. "Session limit reached at 9:15am". The
+  reset time stays on the line that already carried it, so nothing is said twice.
+
 ## [1.0.2] — 2026-08-05
 
 ### Changed

@@ -57,7 +57,15 @@ At this rate: session limit reached by 4:12pm
 ```
 
 The third line projects forward from how fast you're currently spending. It says "On pace" when
-both limits are tracking to last their windows.
+both limits are tracking to last their windows. Once a limit is actually spent there's nothing
+left to project, so it tells you when you hit it instead:
+
+```
+Session limit reached at 9:15am
+```
+
+That's the time the widget first saw 100%, so it only knows if it was running at the time. The
+reset times stay on the first two lines either way.
 
 The session is a countdown because it's usually close; the weekly is a wall-clock time because
 a countdown in days isn't much use. Both keep working while the bars are grey — a reset time
