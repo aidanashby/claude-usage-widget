@@ -119,6 +119,8 @@ DEFAULTS = {
     "theme": "claude",
     "click_through": False,
     "alerts": True,
+    "full_session": None,
+    "full_weekly": None,
     "alerted_session": None,
     "alerted_weekly": None,
     "seen_welcome": False,
@@ -288,6 +290,19 @@ def project_exhaustion(pct, progress, window_seconds, now=None):
     if seconds_to_full >= remaining_window:
         return None  # won't run out before it resets
     return now + seconds_to_full
+
+
+def record_full(pct, reset_epoch, already, now=None):
+    """When usage first hit 100% in this window: [reset_epoch, epoch] or None.
+
+    `already` is the same pair from settings. A different reset means a new
+    window, so the old moment no longer applies.
+    """
+    if pct < 100:
+        return None
+    if already and already[0] == reset_epoch:
+        return already
+    return [reset_epoch, time.time() if now is None else now]
 
 
 def parse_version(text):
@@ -1384,7 +1399,24 @@ class Widget:
         return lines
 
     def pace_line(self):
-        """Whichever limit runs out first at the current rate, or 'on pace'."""
+        """Whichever limit runs out first at the current rate, or 'on pace'.
+
+        A limit already at 100% isn't a projection any more, so it reports
+        when it filled up and when it frees again instead.
+        """
+        for label, pct, full, reset in (
+            ("Session", self.session, self.s["full_session"],
+             self.s["last_session_reset"]),
+            ("Weekly", self.weekly, self.s["full_weekly"],
+             self.s["last_weekly_reset"]),
+        ):
+            if pct < 100:
+                continue
+            # ponytail: no reset time here -- the two lines above already
+            # carry it, for both limits, whatever the state of the bars.
+            when = (format_reset_time(full[1])
+                    if full and full[0] == reset else "an unknown time")
+            return "%s limit reached at %s" % (label, when)
         soonest, soonest_label = None, ""
         for label, pct, reset, window in (
             ("session", self.session, self.s["last_session_reset"],
@@ -1517,6 +1549,12 @@ class Widget:
                 self.s["last_session_reset"] = result.session_reset
             if result.weekly_reset:
                 self.s["last_weekly_reset"] = result.weekly_reset
+            self.s["full_session"] = record_full(
+                result.session, self.s["last_session_reset"],
+                self.s["full_session"])
+            self.s["full_weekly"] = record_full(
+                result.weekly, self.s["last_weekly_reset"],
+                self.s["full_weekly"])
             save_settings(self.s)
         self.draw()
         # The bars are deliberately unlabelled, so the tooltip carries the numbers.
@@ -1911,6 +1949,14 @@ def selftest():
     # the same percentage in a NEW window fires again
     assert due_alerts(85, 3000, state)[0] == [80], "new window must reset"
     assert due_alerts(50, 1000, None)[0] == []
+
+    # 100% is timestamped once and held until the window resets
+    assert record_full(99, 1000, None) is None
+    first = record_full(100, 1000, None, now=500)
+    assert first == [1000, 500]
+    assert record_full(100, 1000, first, now=900) == first, "must not re-stamp"
+    assert record_full(100, 2000, first, now=900) == [2000, 900], "new window"
+    assert record_full(80, 1000, first) is None, "usage fell back under"
 
     # burn rate: only meaningful once some of the window has elapsed
     now = 1_000_000.0
