@@ -3,6 +3,38 @@
 All notable changes to this project are documented here. Versions follow
 [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [1.1.0] — 2026-08-13
+
+Grey bars used to say nothing about why. Now they explain themselves.
+
+### Added
+
+- **The reason on hover.** When the widget can't read your usage, the tooltip leads with what
+  actually went wrong — expired sign-in, no credentials, rate limiting, no connection — how
+  stale the numbers are, and when it will try again. The reset times stay: they're cached
+  wall-clock facts and remain true with no API at all. The pace line goes, being a projection
+  off stale numbers.
+- **A diagnostics window** behind a click on the grey bars, replacing the silent
+  launch-Claude-and-hope. It gives the reason in full, when the last good reading was, when the
+  next attempt is due, whether Claude is running, and — for credential problems — every path
+  checked with a found/not-there mark against each. Paths only; no token is ever displayed.
+- **A remedy matched to the situation, and only when it would help.** Starting Claude isn't
+  offered when Claude is already running. An expired or rejected token offers **Restart Claude**
+  instead, which asks first, closes the desktop app politely (`WM_CLOSE`, so unsaved work can
+  prompt) and only forces the issue after five seconds. Missing credentials with Claude already
+  running offers no start button at all, and says the credentials file comes from Claude Code.
+- **Retry now**, which cuts a backoff wait short and restarts the backoff. Waits reach thirty
+  minutes, which is a long time to sit through after fixing the problem.
+
+### Changed
+
+- An **expired** token and an **absent** one are now told apart. They had shared a return value,
+  so the widget couldn't distinguish the two most common failures — which want opposite advice.
+- The restart path identifies the desktop app by **install location, not executable name**. Both
+  the desktop app and Claude Code are `claude.exe`; matching on the name alone would have let a
+  restart reach live CLI sessions. An executable whose path can't be read is never treated as the
+  desktop app.
+
 ## [1.0.3] — 2026-08-06
 
 ### Changed

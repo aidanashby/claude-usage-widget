@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "1.0.3"
+__version__ = "1.1.0"
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -19,7 +19,7 @@ import tkinter as tk
 from collections import namedtuple
 from datetime import datetime
 import urllib.request
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORTABLE_MARKER = "portable.txt"
@@ -233,6 +233,39 @@ def format_reset_time(epoch, now=None):
     return "%s %s" % (time.strftime("%a", lt), format_clock(epoch))
 
 
+def format_ago(seconds):
+    """'just now', '14 minutes ago', '3 hours ago'."""
+    seconds = int(seconds)
+    if seconds < 90:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return "%d minutes ago" % minutes
+    hours = minutes // 60
+    if hours < 24:
+        return "%d hour%s ago" % (hours, "" if hours == 1 else "s")
+    days = hours // 24
+    return "%d day%s ago" % (days, "" if days == 1 else "s")
+
+
+def disconnected_lines(failure, last_ok, next_retry, now):
+    """The first two hover lines when the bars are grey.
+
+    Says what went wrong and how stale the numbers are. The reset lines that
+    follow it are added by the caller: they stay true with no API at all,
+    which is the whole reason they're cached.
+    """
+    first = "Not connected — %s" % failure.reason
+    parts = []
+    if last_ok:
+        parts.append("Last read %s" % format_ago(now - last_ok))
+    else:
+        parts.append("No reading yet")
+    if next_retry and next_retry > now:
+        parts.append("retrying %s" % format_countdown(next_retry - now))
+    return [first, "  ·  ".join(parts), "Click for details"]
+
+
 def backoff_delay(failures, retry_after=None, base=None, jitter=0.0):
     """How long to wait before the next poll attempt.
 
@@ -436,6 +469,152 @@ def detect_launch_cmd():
     return ""
 
 
+class _ProcessEntry(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def _image_path(pid):
+    """Full path of a process's executable, or "" if we can't see it."""
+    k32 = ctypes.windll.kernel32
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    # PROCESS_QUERY_LIMITED_INFORMATION: works without elevation, which
+    # matters because the widget runs as an ordinary user.
+    handle = k32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return ""
+    finally:
+        k32.CloseHandle(handle)
+
+
+def is_desktop_app(path):
+    """Is this executable the Claude desktop app rather than Claude Code?
+
+    Both are called claude.exe. Claude Code is a CLI that people run many of
+    at once -- closing those would destroy live sessions and unsaved work, so
+    the restart path must never be able to touch them. Matching on the
+    install location is what separates the two.
+    """
+    low = (path or "").replace("/", "\\").lower()
+    if not low:
+        return False  # can't see it -> don't claim it
+    return any(mark in low for mark in (
+        "\\anthropicclaude\\", "\\windowsapps\\",
+        "\\programs\\claude\\", "\\program files\\claude\\",
+    ))
+
+
+def claude_processes(desktop_only=True):
+    """Running Claude processes as (pid, name, path).
+
+    Defaults to the desktop app alone. Fails safe in both directions: an
+    executable we can't identify is not treated as the desktop app, so at
+    worst we offer a start that achieves nothing -- never a close that
+    destroys a Claude Code session.
+    """
+    k32 = ctypes.windll.kernel32
+    # Declaring these is not optional. Undeclared handle types get truncated
+    # on 64-bit, which is exactly how the tray icon broke in 0.7.0.
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry)]
+    k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    found = []
+    snapshot = k32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snapshot in (None, -1, 0xFFFFFFFFFFFFFFFF):
+        return found
+    entry = _ProcessEntry()
+    entry.dwSize = ctypes.sizeof(_ProcessEntry)
+    try:
+        ok = k32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            name = entry.szExeFile or ""
+            if name.lower().startswith("claude") and name.lower().endswith(".exe"):
+                path = _image_path(entry.th32ProcessID)
+                if not desktop_only or is_desktop_app(path):
+                    found.append((entry.th32ProcessID, name, path))
+            ok = k32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snapshot)
+    return found
+
+
+def close_processes(pids, grace=5.0):
+    """Ask these processes to close, then insist if they don't.
+
+    WM_CLOSE first, so an app with unsaved work gets to prompt about it.
+    TerminateProcess is the fallback and never the opening move.
+    """
+    user32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    wanted = set(pids)
+
+    enum_proc = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def visit(hwnd, _):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in wanted:
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        return True
+
+    user32.EnumWindows(enum_proc(visit), 0)
+
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        if not [p for p, _, _ in claude_processes() if p in wanted]:
+            return
+        time.sleep(0.25)
+
+    for pid in wanted:
+        handle = k32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+        if not handle:
+            continue
+        try:
+            k32.TerminateProcess(handle, 0)
+            log("force-closed Claude pid", pid, "after asking politely")
+        finally:
+            k32.CloseHandle(handle)
+
+
+def remedy_for(remedy, running):
+    """What to offer the user, given the failure and whether Claude is up.
+
+    Offering "start Claude" while Claude is plainly on screen is worse than
+    offering nothing, so every remedy is a function of both.
+    """
+    if remedy in ("expired", "rejected"):
+        return "restart" if running else "start"
+    if remedy == "missing":
+        # Starting the desktop app again cannot produce a credentials file it
+        # never writes. Signing in to Claude Code is the actual fix.
+        return "signin" if running else "start"
+    if remedy == "wait":
+        return "wait"
+    return "retry"
+
+
 def credential_files():
     """Every place Claude Code might keep .credentials.json, best guess first."""
     seen, out = set(), []
@@ -454,23 +633,27 @@ def credential_files():
 
 
 def _token_from_blob(text):
-    """Pull an unexpired access token out of a credentials JSON document."""
+    """Pull an access token out of a credentials document.
+
+    Returns (state, token) where state is "ok", "expired" or "none". Expired
+    still doesn't get used -- spending a round trip to be told 401 helps
+    nobody -- but it is a different situation from having no credentials at
+    all, and the two want opposite advice, so they can't share a return value.
+    """
     try:
         data = json.loads(text)
     except ValueError:
-        return None
+        return ("none", None)
     oauth = data.get("claudeAiOauth") or data
     if not isinstance(oauth, dict):
-        return None
+        return ("none", None)
     token = oauth.get("accessToken")
     expires = oauth.get("expiresAt")
     if not token:
-        return None
-    # Expired is as good as absent: go grey so a click can relaunch Claude,
-    # rather than spending a round trip to be told 401.
+        return ("none", None)
     if isinstance(expires, (int, float)) and time.time() * 1000 > expires:
-        return None
-    return token
+        return ("expired", None)
+    return ("ok", token)
 
 
 def _credentials_from_manager():
@@ -495,7 +678,8 @@ def _credentials_from_manager():
     count = wintypes.DWORD()
     creds = ctypes.POINTER(ctypes.POINTER(CREDENTIAL))()
     if not advapi.CredEnumerateW(None, 0, ctypes.byref(count), ctypes.byref(creds)):
-        return None
+        return ("none", None)
+    best = ("none", None)
     try:
         for i in range(count.value):
             cred = creds[i].contents
@@ -504,34 +688,49 @@ def _credentials_from_manager():
             raw = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
             for encoding in ("utf-8", "utf-16-le"):
                 try:
-                    token = _token_from_blob(raw.decode(encoding))
+                    found = _token_from_blob(raw.decode(encoding))
                 except UnicodeDecodeError:
                     continue
-                if token:
-                    return token
+                if found[0] == "ok":
+                    return found
+                if found[0] == "expired":
+                    best = found
     finally:
         advapi.CredFree(creds)
-    return None
+    return best
 
 
 def find_token():
-    """Locate Claude's OAuth access token, wherever this machine keeps it."""
+    """Locate Claude's OAuth access token, wherever this machine keeps it.
+
+    Returns (state, token). A usable token anywhere wins; failing that, an
+    expired one found anywhere beats reporting nothing at all, because the
+    remedy for the two differs.
+    """
+    best = ("none", None)
     for path in credential_files():
         try:
             with open(path, encoding="utf-8") as f:
-                token = _token_from_blob(f.read())
+                found = _token_from_blob(f.read())
         except OSError:
             continue
-        if token:
-            return token
+        if found[0] == "ok":
+            return found
+        if found[0] == "expired":
+            best = found
     try:
-        return _credentials_from_manager()
+        found = _credentials_from_manager()
     except Exception:
-        return None  # ponytail: no Credential Manager access -> just go grey
+        return best  # ponytail: no Credential Manager access -> just go grey
+    return found if found[0] != "none" else best
 
 
 Usage = namedtuple("Usage", "session weekly session_reset weekly_reset")
-Failure = namedtuple("Failure", "reason retry_after")
+Failure = namedtuple("Failure", "reason retry_after detail remedy")
+# detail is a sentence for the diagnostics window; remedy is a key the UI
+# switches on. The code that knows what went wrong picks it, so nothing
+# downstream has to re-parse a message string.
+Failure.__new__.__defaults__ = (None, "", "network")
 
 
 def fetch_usage():
@@ -546,9 +745,21 @@ def fetch_usage():
     it -- racing Claude's own refresh can invalidate its session. Launching
     Claude is the refresh path.
     """
-    token = find_token()
+    state, token = find_token()
     if not token:
-        return Failure("no Claude credentials found", None)
+        if state == "expired":
+            return Failure(
+                "Claude sign-in has expired", None,
+                "A stored token was found, but it has passed its expiry."
+                " Claude refreshes its token when it starts, so restarting it"
+                " is usually enough.",
+                "expired")
+        return Failure(
+            "No Claude credentials found", None,
+            "No stored token was found in any of the places Claude keeps one."
+            " The credentials file is written by Claude Code when you sign in"
+            " -- the desktop app on its own does not create it.",
+            "missing")
     req = urllib.request.Request(
         USAGE_URL,
         headers={
@@ -569,13 +780,32 @@ def fetch_usage():
     except urllib.error.HTTPError as e:
         retry_after = parse_retry_after(e.headers.get("Retry-After"))
         if e.code == 429:
-            return Failure("rate limited by the API — will retry", retry_after)
+            return Failure(
+                "Rate limited by the API", retry_after,
+                "The usage endpoint is asking for fewer requests. Nothing is"
+                " wrong with your setup and nothing needs doing -- the widget"
+                " backs off and recovers on its own.",
+                "wait")
         if e.code in (401, 403):
-            return Failure("Claude credentials rejected — sign in again", None)
-        return Failure("usage request failed (HTTP %s)" % e.code, retry_after)
+            return Failure(
+                "Claude credentials rejected", None,
+                "A token was found and sent, but the API refused it. It has"
+                " most likely been revoked or superseded. Restarting Claude"
+                " refreshes it; signing in again will fix it for certain.",
+                "rejected")
+        return Failure(
+            "Usage request failed (HTTP %s)" % e.code, retry_after,
+            "The usage endpoint returned an unexpected response. This is"
+            " usually temporary. If it persists, widget.log has the detail.",
+            "http")
     except Exception:
         # ponytail: offline, DNS, schema drift -- all just mean "go grey"
-        return Failure("usage unavailable", None)
+        return Failure(
+            "Usage unavailable", None,
+            "The request could not be completed at all -- no connection, DNS"
+            " failure, a proxy in the way, or a response the widget could not"
+            " read.",
+            "network")
 
 
 class _Rect(ctypes.Structure):
@@ -1182,7 +1412,13 @@ class Widget:
         self.dragging = False
         self.press = None
         self.origin = None
+        self.failure = None
+        self.last_ok = None
+        self.next_retry = None
+        self.diag = None
         self.stopping = threading.Event()
+        self.wake = threading.Event()  # cuts a backoff wait short
+        self.retry_requested = False
         self.edge = self.s["edge"]
 
         self.root = tk.Tk()
@@ -1395,6 +1631,13 @@ class Widget:
             ),
             "Weekly limit: resets %s" % format_reset_time(weekly),
         ]
+        if self.failure:
+            # The reset lines still hold -- they're cached wall-clock facts,
+            # true with no API at all. The pace line is the one that has to
+            # go: a projection off stale numbers is worse than no projection.
+            return disconnected_lines(
+                self.failure, self.last_ok, self.next_retry, time.time()
+            ) + lines
         lines.append(self.pace_line())
         return lines
 
@@ -1478,6 +1721,103 @@ class Widget:
         ttk.Button(frame, text="Got it", command=close).pack(anchor="e", pady=(14, 0))
         win.protocol("WM_DELETE_WINDOW", close)
 
+    def show_diagnostics(self):
+        """Why the bars are grey, and the one thing worth doing about it."""
+        if self.diag is not None:
+            try:
+                self.diag.deiconify()
+                self.diag.lift()
+                return
+            except tk.TclError:
+                self.diag = None
+        failure = self.failure or Failure(
+            "Usage unavailable", None,
+            "No reading has been taken yet.", "network")
+        procs = claude_processes()
+        action = remedy_for(failure.remedy, bool(procs))
+
+        win = tk.Toplevel(self.root)
+        self.diag = win
+        win.title("%s — not connected" % WINDOW_TITLE)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text=failure.reason,
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(frame, text=failure.detail, wraplength=420,
+                  justify="left").pack(anchor="w", pady=(4, 0))
+
+        now = time.time()
+        facts = [
+            "Last successful reading: %s" % (
+                format_ago(now - self.last_ok) if self.last_ok
+                else "none since the widget started"),
+            "Next automatic attempt: %s" % (
+                format_countdown(self.next_retry - now)
+                if self.next_retry and self.next_retry > now else "any moment"),
+            "Claude desktop app: %s" % (
+                "running" if procs else "not running"),
+        ]
+        cli = [p for p in claude_processes(desktop_only=False)
+               if not is_desktop_app(p[2])]
+        if cli:
+            facts.append("Claude Code sessions running: %d (left alone)"
+                         % len(cli))
+        for line in facts:
+            ttk.Label(frame, text=line, wraplength=420, justify="left").pack(
+                anchor="w", pady=(2, 0))
+
+        if failure.remedy in ("missing", "expired"):
+            ttk.Label(frame, text="Credentials looked for in:",
+                      font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 2))
+            for path in credential_files():
+                mark = "found" if os.path.exists(path) else "not there"
+                # Paths only. A token never appears in this window, the log,
+                # or anywhere else the user might screenshot.
+                ttk.Label(frame, text="  %s — %s" % (path, mark),
+                          wraplength=420, justify="left",
+                          font=("Segoe UI", 8)).pack(anchor="w")
+            ttk.Label(frame, text="  Windows Credential Manager — also checked",
+                      font=("Segoe UI", 8)).pack(anchor="w")
+
+        if action == "signin":
+            ttk.Label(
+                frame, wraplength=420, justify="left",
+                text="Claude is already running, so starting it again won't"
+                     " help. Sign in to Claude Code (run `claude` in a"
+                     " terminal) -- that's what writes the credentials file.",
+            ).pack(anchor="w", pady=(10, 0))
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(14, 0))
+
+        def close():
+            self.diag = None
+            win.destroy()
+
+        def act(fn):
+            def run():
+                fn()
+                close()
+            return run
+
+        primary = {
+            "start": ("Start Claude", self.launch_claude),
+            "restart": ("Restart Claude", self.restart_claude),
+        }.get(action)
+        if primary:
+            ttk.Button(buttons, text=primary[0],
+                       command=act(primary[1])).pack(side="left")
+        ttk.Button(buttons, text="Retry now",
+                   command=act(self.poll_now)).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="Open log folder",
+                   command=lambda: os.startfile(data_dir())).pack(side="left",
+                                                                  padx=(6, 0))
+        ttk.Button(buttons, text="Close", command=close).pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", close)
+
     def reset_position(self):
         """Put the widget back top-right of the primary monitor."""
         target = self.default_position()
@@ -1487,6 +1827,7 @@ class Widget:
 
     def quit(self):
         self.stopping.set()  # let the poll thread finish before the interpreter does
+        self.wake.set()  # and don't make it sit out the rest of a backoff first
         if self.tray:
             self.tray.remove()
         self.root.destroy()
@@ -1526,6 +1867,11 @@ class Widget:
                 failures += 1
                 retry_after = result.retry_after
             self.maybe_check_update()
+            if self.retry_requested:
+                # A manual retry means something changed, so start the
+                # backoff over rather than resuming a half-hour wait.
+                self.retry_requested = False
+                failures = 0
             # Backs off while failing and spreads installations out, so a
             # popular copy of this doesn't become a thundering herd.
             delay = backoff_delay(
@@ -1535,11 +1881,23 @@ class Widget:
             if failures and (failures == 1 or failures % 5 == 0):
                 log("poll failed (%s); next attempt in %d min"
                     % (result.reason, round(delay / 60)))
-            self.stopping.wait(delay)
+            try:
+                self.root.after(0, self._note_retry, time.time() + delay)
+            except tk.TclError:
+                return
+            # Waits on wake rather than stopping so "Retry now" can cut it
+            # short; quit() sets both, so shutdown is still immediate.
+            self.wake.wait(delay)
+            self.wake.clear()
+
+    def _note_retry(self, when):
+        self.next_retry = when
 
     def apply_usage(self, result):
         self.live = isinstance(result, Usage)
+        self.failure = None if self.live else result
         if self.live:
+            self.last_ok = time.time()
             self.session, self.weekly = result.session, result.weekly
             self.s["last_session"] = result.session
             self.s["last_weekly"] = result.weekly
@@ -1659,7 +2017,7 @@ class Widget:
         if self.live:
             self.open_settings()
         else:
-            self.launch_claude()
+            self.show_diagnostics()
 
     def ensure_launch_cmd(self):
         """Resolve how to start Claude on first use, then remember it."""
@@ -1679,6 +2037,49 @@ class Widget:
             subprocess.Popen(cmd, shell=True)
         except OSError as e:
             log("launch failed:", e)
+
+    def restart_claude(self):
+        """Close Claude and start it again, so it refreshes its token.
+
+        Asks first, and asks Claude politely to close before insisting: this
+        is the only thing the widget does that can lose someone's work.
+        """
+        procs = claude_processes()
+        if not procs:
+            self.launch_claude()
+            return
+        if not messagebox.askokcancel(
+            "Restart Claude",
+            "This will close the Claude desktop app and start it again, so it"
+            " refreshes its sign-in.\n\n"
+            "Save anything you're working on first.\n\n"
+            "Claude Code sessions in a terminal are not affected.",
+            parent=self.root,
+        ):
+            return
+        threading.Thread(target=self._restart_worker, args=(procs,),
+                         daemon=True).start()
+
+    def _restart_worker(self, procs):
+        """Off the UI thread: the polite close waits up to five seconds."""
+        try:
+            close_processes([pid for pid, _, _ in procs])
+        except Exception as e:
+            log_exception("restarting Claude", e)
+        try:
+            self.root.after(0, self.launch_claude)
+            self.root.after(3000, self.poll_now)
+        except tk.TclError:
+            pass  # window went away mid-restart
+
+    def poll_now(self):
+        """Ask the poll thread to try again immediately.
+
+        Backoff reaches thirty minutes, so someone who has just fixed the
+        problem should not have to sit through the rest of it.
+        """
+        self.retry_requested = True
+        self.wake.set()
 
     def snap(self):
         x, y = self.root.winfo_x(), self.root.winfo_y()
@@ -1882,22 +2283,10 @@ def selftest():
     x, y = edge_position("bottom", 900, 500, w, h, (0, 0, 1920, 1040), 12)
     assert y + h <= 1040
 
-    # token parsing: both the wrapped and bare shapes, expiry respected
-    future = (time.time() + 3600) * 1000
-    past = (time.time() - 3600) * 1000
+    # token parsing: the bare shape as well as the wrapped one
     assert _token_from_blob(
-        json.dumps({"claudeAiOauth": {"accessToken": "t", "expiresAt": future}})
-    ) == "t"
-    assert _token_from_blob(
-        json.dumps({"accessToken": "t", "expiresAt": future})
-    ) == "t"
-    assert _token_from_blob(
-        json.dumps({"claudeAiOauth": {"accessToken": "t", "expiresAt": past}})
-    ) is None
-    assert _token_from_blob(json.dumps({"claudeAiOauth": {}})) is None
-    assert _token_from_blob("not json") is None
-    # a token with no expiry recorded is used rather than discarded
-    assert _token_from_blob(json.dumps({"accessToken": "t"})) == "t"
+        json.dumps({"accessToken": "t",
+                    "expiresAt": (time.time() + 3600) * 1000})) == ("ok", "t")
 
     # credential search covers CLAUDE_CONFIG_DIR and the default location
     os.environ["CLAUDE_CONFIG_DIR"] = os.path.join("X:", "custom")
@@ -2177,6 +2566,64 @@ def selftest():
         assert v > prev
         prev = v
     assert ease_out(0.5) > 0.5
+
+    # credential state: usable, expired and absent are three outcomes, not two
+    future = int((time.time() + 3600) * 1000)
+    past = int((time.time() - 3600) * 1000)
+    assert _token_from_blob(
+        json.dumps({"claudeAiOauth": {"accessToken": "t",
+                                      "expiresAt": future}})) == ("ok", "t")
+    assert _token_from_blob(
+        json.dumps({"claudeAiOauth": {"accessToken": "t",
+                                      "expiresAt": past}})) == ("expired", None)
+    assert _token_from_blob(json.dumps({"claudeAiOauth": {}})) == ("none", None)
+    assert _token_from_blob("not json at all") == ("none", None)
+    # No expiry stated means we have to try it rather than assume it's dead
+    assert _token_from_blob(
+        json.dumps({"accessToken": "t"})) == ("ok", "t")
+
+    # remedy: never offer to start something that is already running
+    for remedy, stopped, started in (
+        ("expired", "start", "restart"),
+        ("rejected", "start", "restart"),
+        ("missing", "start", "signin"),
+        ("wait", "wait", "wait"),
+        ("http", "retry", "retry"),
+        ("network", "retry", "retry"),
+    ):
+        assert remedy_for(remedy, False) == stopped, remedy
+        assert remedy_for(remedy, True) == started, remedy
+
+    # desktop app vs Claude Code: the restart path must never reach the CLI,
+    # which people run many of at once and which holds live sessions.
+    for path in (
+        r"C:\Users\x\AppData\Local\AnthropicClaude\app-1.2.3\claude.exe",
+        r"C:\Program Files\WindowsApps\Anthropic.Claude_1.0\claude.exe",
+        r"C:\Users\x\AppData\Local\Programs\Claude\Claude.exe",
+    ):
+        assert is_desktop_app(path), path
+    for path in (
+        r"C:\Users\x\AppData\Roaming\npm\node_modules\@anthropic\claude.exe",
+        r"C:\Users\x\.local\bin\claude.exe",
+        r"C:\tools\claude.exe",
+        "",  # unknown path must never be claimed as the desktop app
+    ):
+        assert not is_desktop_app(path), path
+
+    # hover lines while disconnected
+    now = 1_000_000
+    f = Failure("Claude sign-in has expired", None, "detail", "expired")
+    lines = disconnected_lines(f, now - 840, now + 240, now)
+    assert lines[0] == "Not connected — Claude sign-in has expired", lines
+    assert "14 minutes ago" in lines[1] and "in 4 min" in lines[1], lines
+    # never having connected must not read as having connected at time zero
+    never = disconnected_lines(f, None, None, now)
+    assert "No reading yet" in never[1] and "ago" not in never[1], never
+
+    assert format_ago(30) == "just now"
+    assert format_ago(3600) == "1 hour ago"
+    assert format_ago(90000) == "1 day ago"
+
     print("selftest ok")
 
 

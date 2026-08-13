@@ -1,5 +1,13 @@
 # Gotchas
 
+## The desktop app and Claude Code are both `claude.exe`
+
+Matching processes by name alone finds both, and on a working machine there may be a dozen: the
+desktop app is Electron and runs many helper processes under one name. Anything that *closes*
+Claude has to identify the desktop app by install location (`WindowsApps`, `AnthropicClaude`,
+`Programs\Claude`) via `QueryFullProcessImageNameW`, or it can reach live CLI sessions. A process
+whose path can't be read is never claimed as the desktop app — see `is_desktop_app`.
+
 Every one of these cost real debugging time. Several produced no error message at all.
 
 ## Never `print()` an error — use `log()`

@@ -34,6 +34,7 @@ gauge, with session on the left.
 
 Bar length is percentage of that limit consumed. Orange (`#d17552`) means the reading is live.
 Grey means usage couldn't be read just now, and the bars are showing the last known values.
+Hover to see why, and click for the detail and a way to fix it.
 
 ### The vertical marker
 
@@ -131,8 +132,8 @@ before it appears — tray icons registered too early are silently dropped by th
 
 - **Drag** it anywhere. On release it glides to the nearest edge of whichever monitor it's on,
   with an ease-out animation. Its position is remembered between runs.
-- **Left-click** opens settings — or, if the bars are grey, runs the launch command instead
-  (see below).
+- **Left-click** opens settings — or, if the bars are grey, opens the diagnostics window
+  explaining why and offering the fix (see below).
 - **Right-click the widget** always opens settings, grey or not.
 - **Quit** from the tray icon, or from the settings window.
 
@@ -252,17 +253,25 @@ sending it — it goes grey instead.
 
 ### Why it goes grey
 
-Grey means the last poll failed. Usually one of:
+Grey means the last poll failed. **Hover** and the tooltip names the reason; **click** and you
+get a window with the detail, when the last good reading was, when the next attempt is due, and
+a button for whatever would actually help. Usually it's one of:
 
 - the stored access token has expired
 - you're offline
-- no credentials could be found in any of the locations above
+- no credentials could be found in any of the locations above — that file is written by Claude
+  Code when you sign in, so having the desktop app open doesn't by itself create one
+- the API is rate limiting, in which case nothing is wrong and nothing needs doing
 - you're authenticated by API key or via Bedrock/Vertex rather than a Claude subscription, in
   which case there are no session or weekly limits to report
 
 The widget deliberately does **not** refresh the token itself — racing Claude's own refresh can
-invalidate its session. Instead, starting Claude refreshes the token, so a grey-state click runs
-the launch command, and the bars return to orange on the next poll.
+invalidate its session. Starting Claude refreshes it properly, so that's what the window offers
+when Claude isn't running. When it *is* running, it offers **Restart Claude** instead: an already
+running app won't be helped by being started again. That asks for confirmation first, closes the
+desktop app the polite way so unsaved work can prompt, and only forces it after five seconds.
+Claude Code sessions in a terminal are never touched — the two share the name `claude.exe`, so
+the widget tells them apart by where they're installed.
 
 ### The launch command
 
