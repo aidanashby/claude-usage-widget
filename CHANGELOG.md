@@ -236,6 +236,9 @@ First release. Two thin bars showing Claude session (rolling 5-hour) and weekly 
   Claude to refresh the token
 - Single instance only
 
+[1.1.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v1.1.0
+[1.0.3]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v1.0.3
+[1.0.2]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v1.0.2
 [1.0.1]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v1.0.1
 [1.0.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v1.0.0
 [0.10.0]: https://github.com/aidanashby/claude-usage-widget/releases/tag/v0.10.0

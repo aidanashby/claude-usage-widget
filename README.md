@@ -204,7 +204,7 @@ window) puts everything back as it was.
 | Click-through | off | Mouse passes through — see the warning below |
 | Check GitHub for updates | on | Daily; tells you, never installs |
 | Open on startup | off | Registry `Run` entry |
-| Launch command | auto-detected on first use | What a grey-state click runs |
+| Launch command | auto-detected on first use | What the diagnostics window's start button runs |
 
 Everything is written to `settings.json` in `%APPDATA%\ClaudeUsageWidget`, along with the last
 known usage values and the widget's position. Delete that file to reset to defaults.
