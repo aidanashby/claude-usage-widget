@@ -941,6 +941,10 @@ def _declare_win32():
     u.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
     u.FindWindowW.restype = wintypes.HWND
     u.PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, WPARAM, LPARAM]
+    u.SetWindowPos.argtypes = [
+        wintypes.HWND, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+    ]
     u.LoadIconW.restype = wintypes.HICON
     u.CreatePopupMenu.restype = wintypes.HMENU
     u.TrackPopupMenu.argtypes = [
@@ -1571,8 +1575,31 @@ class Widget:
         self.draw()
         self.root.after(MARKER_REFRESH_MS, self.tick_marker)
 
+    def toplevel_hwnd(self):
+        """The real top-level handle. Under overrideredirect winfo_id can be
+        the child window, whose parent is the toplevel."""
+        user32 = ctypes.windll.user32
+        hwnd = self.root.winfo_id()
+        return user32.GetParent(hwnd) or hwnd
+
+    def reassert_topmost(self):
+        """Put the widget back on top.
+
+        Windows drops the topmost band on its own: a full-screen app, a UAC
+        prompt, or the shell's own foreground-lock handling can all demote us,
+        and Tk's -topmost is already True so re-setting it does nothing. Only
+        SetWindowPos re-enters the band. SWP_NOACTIVATE so we never steal focus.
+        """
+        try:
+            ctypes.windll.user32.SetWindowPos(
+                self.toplevel_hwnd(), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010
+            )
+        except Exception as e:
+            log_exception("topmost", e)
+
     def watch_layout(self):
         self.ensure_visible()
+        self.reassert_topmost()
         self.root.after(2000, self.watch_layout)
 
     def toggle_vertical(self, value, scales):
@@ -1596,12 +1623,7 @@ class Widget:
         """
         try:
             user32 = ctypes.windll.user32
-            hwnd = self.root.winfo_id()
-            # Under overrideredirect winfo_id can be the child; the toplevel is
-            # its parent when so.
-            parent = user32.GetParent(hwnd)
-            if parent:
-                hwnd = parent
+            hwnd = self.toplevel_hwnd()
             get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
             set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
             get_long.restype = ctypes.c_ssize_t
