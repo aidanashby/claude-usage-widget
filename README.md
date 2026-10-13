@@ -56,7 +56,7 @@ The session is a countdown because it's usually close; the weekly is a wall-cloc
 
 ## Install
 
-You need Windows, and Claude installed and signed in — either the desktop app or the Claude Code CLI, since both share the same stored credentials.
+You need Windows, and Claude installed and signed in — you need to have signed in to the Claude Code CLI at least once, because the widget reads the credentials it stores. After that, the widget renews the sign-in itself when it expires, so Claude Code doesn't need to be running.
 
 ### Download it
 

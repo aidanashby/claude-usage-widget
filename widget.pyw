@@ -25,6 +25,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PORTABLE_MARKER = "portable.txt"
 APP_FOLDER = "ClaudeUsageWidget"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# Claude Code's own OAuth client, as its refresh request uses.
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 RELEASES_API = (
     "https://api.github.com/repos/aidanashby/claude-usage-widget/releases/latest"
 )
@@ -725,6 +728,64 @@ def find_token():
     return found if found[0] != "none" else best
 
 
+def cli_running():
+    """Is a Claude Code CLI process up (as opposed to the desktop app)?"""
+    return any(not is_desktop_app(path)
+               for _, _, path in claude_processes(desktop_only=False))
+
+
+def refresh_credentials():
+    """Renew an expired token in Claude Code's credentials file ourselves.
+
+    Only when no Claude Code CLI is running: a refresh rotates the refresh
+    token, so two refreshers racing would leave one holding a dead token.
+    The new pair goes back into the same file, so Claude Code picks it up
+    next time it starts. Returns True if a fresh token was written.
+    """
+    if cli_running():
+        return False
+    for path in credential_files():
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)  # re-read right before refreshing
+        except (OSError, ValueError):
+            continue
+        oauth = data.get("claudeAiOauth")
+        if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
+            continue
+        if _token_from_blob(json.dumps(data))[0] == "ok":
+            return True  # someone else refreshed it meanwhile
+        body = {
+            "grant_type": "refresh_token",
+            "refresh_token": oauth["refreshToken"],
+            "client_id": OAUTH_CLIENT_ID,
+        }
+        if oauth.get("scopes"):
+            body["scope"] = " ".join(oauth["scopes"])
+        req = urllib.request.Request(
+            OAUTH_TOKEN_URL, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                fresh = json.load(r)
+            now_ms = int(time.time() * 1000)
+            oauth["accessToken"] = fresh["access_token"]
+            oauth["refreshToken"] = fresh.get("refresh_token", oauth["refreshToken"])
+            oauth["expiresAt"] = now_ms + int(fresh["expires_in"]) * 1000
+            if fresh.get("refresh_token_expires_in"):
+                oauth["refreshTokenExpiresAt"] = (
+                    now_ms + int(fresh["refresh_token_expires_in"]) * 1000)
+            tmp = path + ".widget-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, path)  # atomic, so Claude never reads half a file
+            log("refreshed Claude token in", path)
+            return True
+        except Exception as e:
+            log_exception("token refresh", e)
+    return False
+
+
 Usage = namedtuple("Usage", "session weekly session_reset weekly_reset")
 Failure = namedtuple("Failure", "reason retry_after detail remedy")
 # detail is a sentence for the diagnostics window; remedy is a key the UI
@@ -741,11 +802,12 @@ def fetch_usage():
     start Claude in the first case is just wrong. retry_after carries the
     server's own request when it makes one.
 
-    Uses the OAuth token Claude already stores. Deliberately does not refresh
-    it -- racing Claude's own refresh can invalidate its session. Launching
-    Claude is the refresh path.
+    Uses the OAuth token Claude already stores, renewing it if it has expired
+    and Claude Code isn't running to do that itself.
     """
     state, token = find_token()
+    if state == "expired" and refresh_credentials():
+        state, token = find_token()
     if not token:
         if state == "expired":
             return Failure(
