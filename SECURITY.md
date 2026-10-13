@@ -6,17 +6,19 @@ This tool reads an authentication token from your disk, so you're right to want 
 
 ## What it reads
 
-One thing: the OAuth access token that Claude already stores on your machine, from whichever of these exists —
+One thing: the OAuth tokens that Claude Code already stores on your machine, from whichever of these exists —
 
 1. `%CLAUDE_CONFIG_DIR%\.credentials.json`
 2. `%USERPROFILE%\.claude\.credentials.json`
 3. Windows Credential Manager
 
-It reads the token, uses it, and holds it in memory only for the duration of the request. It is never written to disk, never logged, and never shown in the interface.
+It reads the access token, uses it, and holds it in memory only for the duration of the request. It is never logged and never shown in the interface.
+
+The one exception to read-only: when the token in a `.credentials.json` file has been expired for more than ten minutes, the widget renews it and writes the new token pair back into that same file, exactly where Claude Code keeps it. It writes nowhere else, and never touches Credential Manager.
 
 ## Where it connects
 
-Two addresses, and no others.
+Three addresses, and no others.
 
 **1. Your usage figures — `api.anthropic.com`**
 
@@ -27,7 +29,15 @@ GET https://api.anthropic.com/api/oauth/usage
 Authenticated with the token above. Returns your two usage percentages and their reset times.
 Polled every five minutes at most, backing off when rate limited.
 
-**2. The update check — `api.github.com`**
+**2. Renewing an expired sign-in — `platform.claude.com`**
+
+```
+POST https://platform.claude.com/v1/oauth/token
+```
+
+Sends the stored refresh token and Claude Code's public client ID, the same request Claude Code makes, and gets back a new token pair. Only made when the stored token has been expired for more than ten minutes.
+
+**3. The update check — `api.github.com`**
 
 ```
 GET https://api.github.com/repos/aidanashby/claude-usage-widget/releases/latest
@@ -56,7 +66,7 @@ The whole program is a single readable Python file, `widget.pyw`. You don't have
 grep -n "urlopen\|https://" widget.pyw
 ```
 
-Every URL in the program appears in that output. At the time of writing there are three, and two `urlopen` calls — one per address above. The third URL is the releases *page*: the widget never fetches it, it only hands it to your browser if you choose to open it.
+Every URL in the program appears in that output. At the time of writing there are four, and three `urlopen` calls — one per address above. The fourth URL is the releases *page*: the widget never fetches it, it only hands it to your browser if you choose to open it.
 
 ## Verifying a downloaded build
 

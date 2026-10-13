@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Versions follow [semantic versioning](https://semver.org/), loosely — this is a single-file desktop widget.
 
+## [Unreleased]
+
+### Changed
+
+- **The widget renews an expired sign-in itself.** Before, it only worked after you started Claude Code, because only Claude Code renewed the token, and the desktop app keeps its own sign-in. When the token in `.credentials.json` has been expired for more than ten minutes, the widget now sends the stored refresh token to Anthropic and writes the new pair back to the same file. The ten-minute wait keeps it from racing Claude Code, which renews before expiry.
+
 ## [1.1.0] — 2026-08-13
 
 Grey bars used to say nothing about why. Now they explain themselves.

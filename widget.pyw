@@ -815,8 +815,8 @@ def fetch_usage():
             return Failure(
                 "Claude sign-in has expired", None,
                 "A stored token was found, but it has passed its expiry."
-                " Claude refreshes its token when it starts, so restarting it"
-                " is usually enough.",
+                " The widget renews tokens that have been expired for ten"
+                " minutes; if this persists, starting Claude Code renews it.",
                 "expired")
         return Failure(
             "No Claude credentials found", None,

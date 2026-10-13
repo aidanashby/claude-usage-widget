@@ -56,7 +56,7 @@ The session is a countdown because it's usually close; the weekly is a wall-cloc
 
 ## Install
 
-You need Windows, and Claude installed and signed in — you need to have signed in to the Claude Code CLI at least once, because the widget reads the credentials it stores. After that, the widget renews the sign-in itself when it expires, so Claude Code doesn't need to be running.
+You need Windows, and to have signed in to the Claude Code CLI at least once, because the widget reads the credentials it stores. After that, the widget renews the sign-in itself when it expires, so Claude Code doesn't need to be running. The desktop app keeps its own sign-in, which the widget can't use.
 
 ### Download it
 
@@ -185,13 +185,15 @@ It authenticates with the OAuth access token Claude already stores locally, look
 2. `%USERPROFILE%\.claude\.credentials.json` — the usual place
 3. Windows Credential Manager, for setups that keep credentials there instead of on disk
 
-The token is read locally, sent only to Anthropic, and never logged, displayed, or written anywhere by the widget. If the stored token has already expired, the widget doesn't bother sending it — it goes grey instead.
+The token is read locally, sent only to Anthropic, and never logged or displayed.
+
+When the token in a `.credentials.json` file has been expired for more than ten minutes, the widget renews it the way Claude Code does: it sends the stored refresh token to Anthropic and writes the new pair back into the same file, so Claude Code uses it next time it starts. The ten minutes is there because Claude Code renews its token before expiry, so a token that stale has nothing else looking after it, and the two can't race to renew it. Tokens in Credential Manager are read but never renewed. If renewal fails, the bars go grey.
 
 ### Why it goes grey
 
 Grey means the last poll failed. **Hover** and the tooltip names the reason; **click** and you get a window with the detail, when the last good reading was, when the next attempt is due, and a button for whatever would actually help. Usually it's one of:
 
-- the stored access token has expired
+- the stored access token has expired and the widget couldn't renew it
 - you're offline
 - no credentials could be found in any of the locations above — that file is written by Claude
   Code when you sign in, so having the desktop app open doesn't by itself create one
@@ -199,7 +201,7 @@ Grey means the last poll failed. **Hover** and the tooltip names the reason; **c
 - you're authenticated by API key or via Bedrock/Vertex rather than a Claude subscription, in
   which case there are no session or weekly limits to report
 
-The widget deliberately does **not** refresh the token itself — racing Claude's own refresh can invalidate its session. Starting Claude refreshes it properly, so that's what the window offers when Claude isn't running. When it *is* running, it offers **Restart Claude** instead: an already running app won't be helped by being started again. That asks for confirmation first, closes the desktop app the polite way so unsaved work can prompt, and only forces it after five seconds.
+If the widget couldn't renew an expired token, starting Claude Code renews it, so that's what the window offers when Claude isn't running. When it *is* running, it offers **Restart Claude** instead: an already running app won't be helped by being started again. That asks for confirmation first, closes the desktop app the polite way so unsaved work can prompt, and only forces it after five seconds.
 Claude Code sessions in a terminal are never touched — the two share the name `claude.exe`, so the widget tells them apart by where they're installed.
 
 ### The launch command
