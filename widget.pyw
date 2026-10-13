@@ -728,22 +728,20 @@ def find_token():
     return found if found[0] != "none" else best
 
 
-def cli_running():
-    """Is a Claude Code CLI process up (as opposed to the desktop app)?"""
-    return any(not is_desktop_app(path)
-               for _, _, path in claude_processes(desktop_only=False))
+STALE_TOKEN_MS = 10 * 60 * 1000
 
 
 def refresh_credentials():
     """Renew an expired token in Claude Code's credentials file ourselves.
 
-    Only when no Claude Code CLI is running: a refresh rotates the refresh
-    token, so two refreshers racing would leave one holding a dead token.
+    A refresh rotates the refresh token, so two refreshers racing would leave
+    one holding a dead token. Claude Code renews before expiry, so a token
+    that has been expired for STALE_TOKEN_MS has nobody looking after it.
+    Process checks don't work here: the Chrome helper and the desktop app's
+    bundled copy are both claude.exe and neither uses this file.
     The new pair goes back into the same file, so Claude Code picks it up
     next time it starts. Returns True if a fresh token was written.
     """
-    if cli_running():
-        return False
     for path in credential_files():
         try:
             with open(path, encoding="utf-8") as f:
@@ -755,6 +753,10 @@ def refresh_credentials():
             continue
         if _token_from_blob(json.dumps(data))[0] == "ok":
             return True  # someone else refreshed it meanwhile
+        expires = oauth.get("expiresAt")
+        if (isinstance(expires, (int, float))
+                and time.time() * 1000 - expires < STALE_TOKEN_MS):
+            continue  # only just expired: leave it to Claude Code
         body = {
             "grant_type": "refresh_token",
             "refresh_token": oauth["refreshToken"],
