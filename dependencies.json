@@ -1,0 +1,16 @@
+{
+  "dependencies": [
+    {
+      "name": "Python",
+      "check": { "run": "python --version" },
+      "install": "winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements"
+    },
+    {
+      "name": "PyInstaller",
+      "purpose": "Only to build the exe with build.py",
+      "optional": true,
+      "check": { "run": "python -m PyInstaller --version" },
+      "install": "python -m pip install pyinstaller"
+    }
+  ]
+}
