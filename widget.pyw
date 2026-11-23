@@ -766,7 +766,9 @@ def refresh_credentials():
             body["scope"] = " ".join(oauth["scopes"])
         req = urllib.request.Request(
             OAUTH_TOKEN_URL, data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"})
+            # Cloudflare rejects urllib's default User-Agent with a 403.
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "claude-usage-widget/" + __version__})
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 fresh = json.load(r)
