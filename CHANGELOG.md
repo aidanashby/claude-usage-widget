@@ -4,8 +4,11 @@ All notable changes to this project are documented here. Versions follow [semant
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-27
+
 ### Changed
 
+- **Dark dialogs.** The settings, welcome and diagnostics windows now use the dark style of yt-slurp and whisper-transcriber: grey panels, darker fields, rounded buttons, ticks instead of crosses, and a dark Windows title bar. The main button in each is the icon's orange, with dark text on it, because white text on that orange fails WCAG AA contrast. Settings are grouped under **Look**, **Behaviour** and **Launch command**. Each window opens in the middle of the screen the widget is on, and Escape closes it (Cancel, in settings).
 - **The widget renews an expired sign-in itself.** Before, it only worked after you started Claude Code, because only Claude Code renewed the token, and the desktop app keeps its own sign-in. When the token in `.credentials.json` has been expired for more than ten minutes, the widget now sends the stored refresh token to Anthropic and writes the new pair back to the same file. The ten-minute wait keeps it from racing Claude Code, which renews before expiry. The request sends its own User-Agent, because Cloudflare refuses Python's default one with a 403.
 
 ## [1.1.0] — 2026-08-13

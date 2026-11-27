@@ -140,7 +140,7 @@ If it vanishes without writing anything to the log, the failure was below Python
 
 ## Settings
 
-Changes preview live as you drag a slider. **Save** keeps them; **Cancel** (or closing the window) puts everything back as it was.
+Changes preview live as you drag a slider. **Save** keeps them; **Cancel** (or Escape, or closing the window) puts everything back as it was. The window opens in the middle of the screen the widget is on.
 
 | Setting | Default | Notes |
 |---------|---------|-------|

@@ -1,5 +1,5 @@
 """Always-on-top Claude usage widget: session + weekly limit bars."""
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import ctypes
 import ctypes.wintypes as wintypes
@@ -1472,6 +1472,160 @@ class Tooltip:
             self.win = None
 
 
+# Dialog colours, after yt-slurp and whisper-transcriber. The accent is the
+# icon's orange: too light for white text (3.3:1), so buttons and ticks on it
+# use dark text (5.1:1) instead.
+BG = "#1b1e23"
+CARD = "#2c3037"
+FIELD = "#1f2227"
+BORDER = "#4a505a"
+TEXT = "#f1f3f5"
+MUTED = "#b0b7c1"
+ACCENT, ACCENT_HOVER, ON_ACCENT = "#d17552", "#dc8a6b", "#1b1e23"
+SLATE, SLATE_HOVER = "#474d57", "#59606b"
+DANGER = "#ffb3bb"
+FONT = "Segoe UI"
+
+
+def rounded_rect(canvas, x1, y1, x2, y2, r, **kw):
+    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2,
+           x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+    return canvas.create_polygon(pts, smooth=True, **kw)
+
+
+class RoundButton(tk.Canvas):
+    """A soft-cornered flat button, as in yt-slurp."""
+
+    def __init__(self, parent, text, command, colour=SLATE, hover=SLATE_HOVER,
+                 fg="white", width=None, height=30):
+        font = (FONT, 10)
+        if width is None:
+            tmp = tk.Label(parent, text=text, font=font)
+            width = tmp.winfo_reqwidth() + 28
+            tmp.destroy()
+        super().__init__(parent, width=width, height=height, bg=CARD,
+                         highlightthickness=0, cursor="hand2", takefocus=1)
+        self.w, self.h, self.text, self.font, self.fg = width, height, text, font, fg
+        self.colour, self.hover, self.focused, self.fill = colour, hover, False, colour
+        self.draw()
+        self.bind("<Enter>", lambda e: self.draw(self.hover))
+        self.bind("<Leave>", lambda e: self.draw(self.colour))
+        self.bind("<Button-1>", lambda e: command())
+        self.bind("<FocusIn>", lambda e: self.set_focus(True))
+        self.bind("<FocusOut>", lambda e: self.set_focus(False))
+        for key in ("<Return>", "<space>"):
+            self.bind(key, lambda e: (command(), "break")[1])
+
+    def set_focus(self, on):
+        self.focused = on
+        self.draw(self.fill)
+
+    def draw(self, fill=None):
+        self.fill = fill or self.fill
+        self.delete("all")
+        rounded_rect(self, 1, 1, self.w - 1, self.h - 1, 5, fill=self.fill, outline=self.fill)
+        self.create_text(self.w / 2, self.h / 2, text=self.text, font=self.font, fill=self.fg)
+        if self.focused:
+            rounded_rect(self, 3, 3, self.w - 3, self.h - 3, 7, fill="",
+                         outline=self.fg, width=2)
+
+
+def dark_title_bar(win):
+    """Windows' own title bar in the panel colour (Windows 11), or plain dark (10)."""
+    try:
+        win.update_idletasks()
+        hwnd = int(win.wm_frame(), 16)  # the outer window, which owns the caption
+
+        def bgr(colour):
+            r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+            return b << 16 | g << 8 | r
+        # dark mode, border colour, caption colour, caption text
+        for attr, value in ((20, 1), (34, bgr(BORDER)), (35, bgr(CARD)), (36, bgr(TEXT))):
+            v = ctypes.c_int(value)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd), attr, ctypes.byref(v), 4)
+    except (AttributeError, OSError, tk.TclError):
+        pass
+
+
+def dark_style(root):
+    """ttk in the dialog colours. Idempotent, so any dialog can call it."""
+    if getattr(root, "_dark_styled", False):
+        return
+    root._dark_styled = True
+    s = ttk.Style(root)
+    s.theme_use("clam")
+    s.configure(".", font=(FONT, 10), background=CARD, foreground=TEXT,
+                insertcolor=TEXT, selectbackground=SLATE, selectforeground=TEXT)
+    for opt, val in (("background", FIELD), ("foreground", TEXT),
+                     ("selectBackground", SLATE), ("selectForeground", TEXT)):
+        root.option_add("*TCombobox*Listbox.%s" % opt, val)
+    s.configure("TCombobox", fieldbackground=FIELD, background=CARD, arrowcolor=TEXT,
+                bordercolor=BORDER, lightcolor=FIELD, darkcolor=FIELD, padding=3)
+    s.map("TCombobox", fieldbackground=[("readonly", FIELD)],
+          selectbackground=[("readonly", FIELD)], selectforeground=[("readonly", TEXT)])
+    s.configure("TEntry", fieldbackground=FIELD, bordercolor=BORDER,
+                lightcolor=FIELD, darkcolor=FIELD, padding=3)
+    s.configure("Horizontal.TScale", troughcolor=FIELD, background=SLATE,
+                bordercolor=BORDER, lightcolor=SLATE, darkcolor=SLATE)
+    s.map("Horizontal.TScale", background=[("active", ACCENT)],
+          lightcolor=[("active", ACCENT)], darkcolor=[("active", ACCENT)])
+    s.configure("TCheckbutton", background=CARD, foreground=TEXT)
+    s.map("TCheckbutton", background=[("active", CARD)])
+    s.configure("Muted.TLabel", foreground=MUTED, font=(FONT, 9))
+
+    # Tick boxes with a tick; clam's own draw a cross
+    def image(fill, edge, tick=None):
+        img = tk.PhotoImage(master=root, width=22, height=16)
+        img.put(edge, to=(0, 0, 16, 16))
+        img.put(fill, to=(1, 1, 15, 15))
+        if tick:
+            for x, y in ((3, 7), (4, 8), (5, 9), (6, 10), (7, 9), (8, 8),
+                         (9, 7), (10, 6), (11, 5), (12, 4)):
+                img.put(tick, to=(x, y, x + 1, y + 2))
+        return img
+    root._tick_imgs = off, on = image(FIELD, MUTED), image(ACCENT, ACCENT, ON_ACCENT)
+    s.element_create("Tick.indicator", "image", off, ("selected", on))
+    s.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+        ("Tick.indicator", {"side": "left", "sticky": ""}),
+        ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [
+            ("Checkbutton.label", {"sticky": "nswe"})]})]})])
+
+
+def modal(root, title, near):
+    """A bordered dark pop-up, centred on the screen that holds `near` (x, y)."""
+    dark_style(root)
+    top = tk.Toplevel(root)
+    top.withdraw()
+    top.title(title)
+    top.configure(bg=BORDER)
+    top.bind("<Map>", lambda e: e.widget is top and dark_title_bar(top))
+    top.attributes("-topmost", True)
+    top.resizable(False, False)
+    border = tk.Frame(top, bg=CARD)
+    border.pack(fill="both", expand=True, padx=1, pady=1)
+    frame = tk.Frame(border, bg=CARD)
+    frame.pack(fill="both", expand=True, padx=22, pady=18)
+
+    def show():
+        top.update_idletasks()
+        left, t, right, bottom = monitor_work_area(
+            near[0], near[1], (0, 0, top.winfo_screenwidth(), top.winfo_screenheight()))
+        x = left + (right - left - top.winfo_reqwidth()) // 2
+        y = t + (bottom - t - top.winfo_reqheight()) // 3
+        top.geometry("+%d+%d" % (x, y))
+        top.deiconify()
+        top.lift()
+        top.focus_force()
+    top.after_idle(show)
+    return top, frame
+
+
+def heading(parent, text, row, first=False):
+    tk.Label(parent, text=text, bg=CARD, fg=TEXT, font=(FONT, 11, "bold")).grid(
+        row=row, column=0, columnspan=3, sticky="w", pady=(0 if first else 12, 4))
+
+
 class Widget:
     def __init__(self):
         self.s = load_settings()
@@ -1768,15 +1922,11 @@ class Widget:
         """Once, on first run. The tray icon is undiscoverable otherwise."""
         self.s["seen_welcome"] = True
         save_settings(self.s)
-        win = tk.Toplevel(self.root)
-        win.title(WINDOW_TITLE)
-        win.attributes("-topmost", True)
-        win.resizable(False, False)
-        frame = ttk.Frame(win, padding=16)
-        frame.pack(fill="both", expand=True)
+        win, frame = modal(self.root, WINDOW_TITLE,
+                           (self.root.winfo_rootx(), self.root.winfo_rooty()))
 
         ttk.Label(frame, text="Two bars, and that's it.",
-                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
+                  font=(FONT, 11, "bold")).pack(anchor="w", pady=(0, 6))
         for line in (
             "The top bar is your current Claude session — the rolling 5-hour limit.",
             "The bottom bar is your weekly limit.",
@@ -1806,7 +1956,9 @@ class Widget:
                     log("startup registry write failed:", e)
             win.destroy()
 
-        ttk.Button(frame, text="Got it", command=close).pack(anchor="e", pady=(14, 0))
+        RoundButton(frame, "Got it", close, colour=ACCENT, hover=ACCENT_HOVER,
+                    fg=ON_ACCENT, width=90).pack(anchor="e", pady=(18, 0))
+        win.bind("<Escape>", lambda e: close())
         win.protocol("WM_DELETE_WINDOW", close)
 
     def show_diagnostics(self):
@@ -1824,16 +1976,12 @@ class Widget:
         procs = claude_processes()
         action = remedy_for(failure.remedy, bool(procs))
 
-        win = tk.Toplevel(self.root)
+        win, frame = modal(self.root, "%s — not connected" % WINDOW_TITLE,
+                           (self.root.winfo_rootx(), self.root.winfo_rooty()))
         self.diag = win
-        win.title("%s — not connected" % WINDOW_TITLE)
-        win.attributes("-topmost", True)
-        win.resizable(False, False)
-        frame = ttk.Frame(win, padding=16)
-        frame.pack(fill="both", expand=True)
 
         ttk.Label(frame, text=failure.reason,
-                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
+                  font=(FONT, 11, "bold")).pack(anchor="w")
         ttk.Label(frame, text=failure.detail, wraplength=420,
                   justify="left").pack(anchor="w", pady=(4, 0))
 
@@ -1859,16 +2007,16 @@ class Widget:
 
         if failure.remedy in ("missing", "expired"):
             ttk.Label(frame, text="Credentials looked for in:",
-                      font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 2))
+                      font=(FONT, 9, "bold")).pack(anchor="w", pady=(10, 2))
             for path in credential_files():
                 mark = "found" if os.path.exists(path) else "not there"
                 # Paths only. A token never appears in this window, the log,
                 # or anywhere else the user might screenshot.
                 ttk.Label(frame, text="  %s — %s" % (path, mark),
                           wraplength=420, justify="left",
-                          font=("Segoe UI", 8)).pack(anchor="w")
+                          style="Muted.TLabel").pack(anchor="w")
             ttk.Label(frame, text="  Windows Credential Manager — also checked",
-                      font=("Segoe UI", 8)).pack(anchor="w")
+                      style="Muted.TLabel").pack(anchor="w")
 
         if action == "signin":
             ttk.Label(
@@ -1878,8 +2026,8 @@ class Widget:
                      " terminal) -- that's what writes the credentials file.",
             ).pack(anchor="w", pady=(10, 0))
 
-        buttons = ttk.Frame(frame)
-        buttons.pack(fill="x", pady=(14, 0))
+        buttons = tk.Frame(frame, bg=CARD)
+        buttons.pack(fill="x", pady=(18, 0))
 
         def close():
             self.diag = None
@@ -1895,15 +2043,16 @@ class Widget:
             "start": ("Start Claude", self.launch_claude),
             "restart": ("Restart Claude", self.restart_claude),
         }.get(action)
+        # The remedy, when there is one, is the main action; otherwise Retry is
+        main = {"colour": ACCENT, "hover": ACCENT_HOVER, "fg": ON_ACCENT}
         if primary:
-            ttk.Button(buttons, text=primary[0],
-                       command=act(primary[1])).pack(side="left")
-        ttk.Button(buttons, text="Retry now",
-                   command=act(self.poll_now)).pack(side="left", padx=(6, 0))
-        ttk.Button(buttons, text="Open log folder",
-                   command=lambda: os.startfile(data_dir())).pack(side="left",
-                                                                  padx=(6, 0))
-        ttk.Button(buttons, text="Close", command=close).pack(side="right")
+            RoundButton(buttons, primary[0], act(primary[1]), **main).pack(side="left")
+        RoundButton(buttons, "Retry now", act(self.poll_now),
+                    **({} if primary else main)).pack(side="left", padx=(8, 0) if primary else 0)
+        RoundButton(buttons, "Open log folder",
+                    lambda: os.startfile(data_dir())).pack(side="left", padx=(8, 0))
+        RoundButton(buttons, "Close", close, width=90).pack(side="right", padx=(16, 0))
+        win.bind("<Escape>", lambda e: close())
         win.protocol("WM_DELETE_WINDOW", close)
 
     def reset_position(self):
@@ -2213,19 +2362,15 @@ class Widget:
             self.reposition()  # size changed, so the edge offset needs redoing
 
     def open_settings(self):
-        win = tk.Toplevel(self.root)
-        win.title("Claude Usage Widget")
-        win.attributes("-topmost", True)
-        win.resizable(False, False)
-        frame = ttk.Frame(win, padding=12)
-        frame.pack(fill="both", expand=True)
-
+        win, frame = modal(self.root, "Claude Usage Widget settings",
+                           (self.root.winfo_rootx(), self.root.winfo_rooty()))
         before = dict(self.s)  # for Cancel
 
         longest = max_bar_length(
             self.current_rect(), self.s["padding"], self.s["vertical"]
         )
         scales = {}
+        heading(frame, "Look", 0, first=True)
         sliders = [
             ("Line length", "bar_length", MIN_BAR_LENGTH, longest, 0),
             ("Line thickness", "thickness", 1, 12, 0),
@@ -2234,13 +2379,13 @@ class Widget:
             ("Background opacity", "alpha", 0.15, 1.0, 2),
             ("Distance from screen edge", "edge_gap", 0, 100, 0),
         ]
-        for row, (label, key, lo, hi, places) in enumerate(sliders):
+        for row, (label, key, lo, hi, places) in enumerate(sliders, start=1):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=3)
             var = tk.DoubleVar(value=float(self.s[key]))
             scale = ttk.Scale(frame, from_=lo, to=hi, variable=var, length=170)
-            scale.grid(row=row, column=1, padx=8)
+            scale.grid(row=row, column=1, padx=10)
             scales[key] = scale
-            readout = ttk.Label(frame, width=6)
+            readout = ttk.Label(frame, width=5, anchor="e", foreground=MUTED)
             readout.grid(row=row, column=2, sticky="e")
 
             def update(*_, v=var, lbl=readout, pl=places, k=key):
@@ -2251,59 +2396,44 @@ class Widget:
             var.trace_add("write", update)
             update()
 
-        row = len(sliders)
+        row = len(sliders) + 1
         ttk.Label(frame, text="Colours").grid(row=row, column=0, sticky="w", pady=3)
         theme = tk.StringVar(value=self.s["theme"])
         ttk.Combobox(
             frame, textvariable=theme, state="readonly", width=14,
             values=sorted(THEMES),
-        ).grid(row=row, column=1, padx=8, sticky="w")
+        ).grid(row=row, column=1, padx=10, sticky="w")
         theme.trace_add("write", lambda *_: self.apply_live("theme", theme.get()))
 
-        row += 1
-        vertical = tk.BooleanVar(value=self.s["vertical"])
-        ttk.Checkbutton(
-            frame, text="Vertical layout", variable=vertical,
-            command=lambda: self.toggle_vertical(vertical.get(), scales),
-        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 3))
+        def check(text, value, command=None):
+            nonlocal row
+            row += 1
+            var = tk.BooleanVar(value=value)
+            ttk.Checkbutton(frame, text=text, variable=var, command=command).grid(
+                row=row, column=0, columnspan=3, sticky="w", pady=1)
+            return var
+
+        vertical = check("Vertical layout", self.s["vertical"],
+                         lambda: self.toggle_vertical(vertical.get(), scales))
 
         row += 1
-        alerts = tk.BooleanVar(value=self.s["alerts"])
-        ttk.Checkbutton(
-            frame, text="Warn me at 80% and 95%", variable=alerts,
-        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 3))
-
-        row += 1
-        updates = tk.BooleanVar(value=self.s["update_check"])
-        ttk.Checkbutton(
-            frame, text="Check GitHub for updates", variable=updates,
-        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 3))
-
-        row += 1
-        click_through = tk.BooleanVar(value=self.s["click_through"])
-        ttk.Checkbutton(
-            frame, text="Click-through (mouse passes to the window beneath)",
-            variable=click_through,
-            command=lambda: self.apply_live("click_through", click_through.get()),
-        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 0))
+        heading(frame, "Behaviour", row)
+        alerts = check("Warn me at 80% and 95%", self.s["alerts"])
+        updates = check("Check GitHub for updates", self.s["update_check"])
+        startup = check("Open on startup", self.s["start_on_login"])
+        click_through = check(
+            "Click-through (mouse passes to the window beneath)", self.s["click_through"],
+            lambda: self.apply_live("click_through", click_through.get()))
         row += 1
         ttk.Label(
-            frame, foreground="#777777", wraplength=330, justify="left",
+            frame, style="Muted.TLabel", wraplength=360, justify="left",
             text="While click-through is on the widget ignores the mouse, so the"
                  " hover tooltip won't appear and you can't drag it. Use the tray"
                  " icon for settings, to move it back, or to quit.",
-        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        ).grid(row=row, column=0, columnspan=3, sticky="w", padx=(22, 0), pady=(0, 4))
 
         row += 1
-        startup = tk.BooleanVar(value=self.s["start_on_login"])
-        ttk.Checkbutton(frame, text="Open on startup", variable=startup).grid(
-            row=row, column=0, columnspan=3, sticky="w", pady=(0, 3)
-        )
-
-        row += 1
-        ttk.Label(frame, text="Launch command (used when grey)").grid(
-            row=row, column=0, columnspan=3, sticky="w", pady=(8, 2)
-        )
+        heading(frame, "Launch command (used when grey)", row)
         row += 1
         launch = tk.StringVar(value=self.ensure_launch_cmd())
         ttk.Entry(frame, textvariable=launch, width=48).grid(
@@ -2333,11 +2463,13 @@ class Widget:
             win.destroy()
 
         row += 1
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=row, column=0, columnspan=3, sticky="we", pady=(14, 0))
-        ttk.Button(buttons, text="Quit widget", command=self.quit).pack(side="left")
-        ttk.Button(buttons, text="Save", command=save).pack(side="right")
-        ttk.Button(buttons, text="Cancel", command=cancel).pack(side="right", padx=6)
+        buttons = tk.Frame(frame, bg=CARD)
+        buttons.grid(row=row, column=0, columnspan=3, sticky="we", pady=(18, 0))
+        RoundButton(buttons, "Quit widget", self.quit, fg=DANGER).pack(side="left")
+        RoundButton(buttons, "Save", save, colour=ACCENT, hover=ACCENT_HOVER,
+                    fg=ON_ACCENT, width=90).pack(side="right")
+        RoundButton(buttons, "Cancel", cancel, width=90).pack(side="right", padx=8)
+        win.bind("<Escape>", lambda e: cancel())
         win.protocol("WM_DELETE_WINDOW", cancel)
 
     def run(self):
